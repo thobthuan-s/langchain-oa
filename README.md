@@ -314,20 +314,29 @@ deployed environment.
 
 ## Registering with Agent 365
 
-```bash
-# 1. Provision the Blueprint and AI Teammate identity
-a365 setup all --agent-name <your-agent-name> --aiteammate --m365
+AI teammates need a hand-authored `a365.config.json` before running setup — the
+config-free `--agent-name` flow is for standard agents without their own user
+account, which this agent is not.
 
-# 2. Choose Work IQ servers from the live catalog
+```bash
+# 1. Fill in tenant, subscription, owner, and blueprint fields
+cp a365.config.template.json a365.config.json
+
+# 2. Provision the Blueprint and AI Teammate identity from that file
+a365 setup all --verbose
+
+# 3. Choose Work IQ servers from the live catalog
 a365 develop list-available
 a365 develop add-mcp-servers "mcp_SharePointRemoteServer" "mcp_MailTools" "mcp_CalendarTools"
 
-# 3. Package for upload
+# 4. Package for upload
 a365 publish
 ```
 
 Upload the generated `manifest.zip` in the Microsoft 365 admin center under
 **Agents → Upload custom agent**, then approve the instance creation request.
+See [Deploy in your tenant](docs/deploy-in-your-tenant.md) for the full
+consent, upload, and approval sequence with citations.
 
 Do not hand-edit `ToolingManifest.json`. The CLI owns it, and the catalog changes
 over time.
@@ -414,13 +423,13 @@ tar -tzf ../langchain-oa.tgz          # expect templates only, no .env
 # 1. Infrastructure — prints the messaging endpoint when it finishes
 bash infra/deploy-azure.sh
 
-# 2. Agent 365 configuration
+# 2. Agent 365 configuration — required before setup for an AI teammate
 cp a365.config.template.json a365.config.json
 #    fill in: clientAppId, subscriptionId, tenantId, managerEmail,
 #             agentUserPrincipalName, messagingEndpoint
 
-# 3. Register, then package
-a365 setup all --agent-name <your-agent-name> --aiteammate --m365
+# 3. Register from that file, then package
+a365 setup all --verbose
 a365 publish
 ```
 
