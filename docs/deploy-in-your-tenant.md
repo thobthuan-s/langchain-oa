@@ -220,7 +220,8 @@ ENABLE_PURVIEW=true PURVIEW_ENFORCE_BLOCKS=false ./infra/deploy-azure.sh
 
 **b. Grant the Graph scopes**
 
-Append to the Agent Identity and Blueprint consent grants:
+Purview needs three delegated Microsoft Graph scopes that `a365 setup all` does
+not grant:
 
 ```text
 Content.Process.User
@@ -228,8 +229,67 @@ ProtectionScopes.Compute.User
 ContentActivity.Write
 ```
 
-If the Blueprint's inheritable Graph permission is `allAllowed`, no inheritable
-permission change is needed.
+> **You cannot do this in the portal for the Agent Identity.** The Blueprint is
+> an app registration plus a service principal, so it has an **API permissions**
+> blade. The Agent Identity is a **service principal only** — there is no app
+> registration behind it, so it has no such blade. Grant its scopes through
+> Microsoft Graph. Both objects appear under **Enterprise applications**, but
+> only the Blueprint can be edited there.
+
+First check whether the Blueprint already allows Graph scopes to flow to its
+children. For an agent identity blueprint the application object ID equals its
+app ID:
+
+```bash
+BLUEPRINT_APP_ID=<from a365.generated.config.json: agentBlueprintId>
+
+az rest --method GET \
+  --url "https://graph.microsoft.com/beta/applications/$BLUEPRINT_APP_ID/microsoft.graph.agentIdentityBlueprint/inheritablePermissions" \
+  --query "value[?resourceAppId=='00000003-0000-0000-c000-000000000000'].inheritableScopes.kind" -o tsv
+```
+
+`allAllowed` means no inheritable-permission change is needed; anything else and
+you must add these scopes to the inheritable set first.
+
+Then append the scopes to the existing Graph consent grant. Do this for the
+Blueprint service principal, and for the Agent Identity if it holds its own
+grant:
+
+```bash
+GRAPH_SP=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)
+CLIENT_SP=<Blueprint service principal object ID, or Agent Identity object ID>
+
+GRANT_ID=$(az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$filter=clientId eq '$CLIENT_SP'" \
+  --query "value[?resourceId=='$GRAPH_SP'].id | [0]" -o tsv)
+
+CURRENT=$(az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$GRANT_ID" \
+  --query scope -o tsv)
+
+NEW=$(python3 -c "import sys;c=sys.argv[1].split();a=['Content.Process.User','ProtectionScopes.Compute.User','ContentActivity.Write'];print(' '.join(c+[s for s in a if s not in c]))" "$CURRENT")
+
+az rest --method PATCH \
+  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$GRANT_ID" \
+  --headers "Content-Type=application/json" \
+  --body "{\"scope\":\"$NEW\"}"
+```
+
+Appending rather than replacing matters — overwriting the `scope` string drops
+the permissions the agent already depends on.
+
+Verify:
+
+```bash
+az rest --method GET \
+  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants/$GRANT_ID" \
+  --query scope -o tsv | tr ' ' '\n' | grep -E 'Content.Process.User|ProtectionScopes.Compute.User|ContentActivity.Write'
+```
+
+These are admin-consented delegated scopes, so you need an admin role that can
+grant consent. Note that inherited permissions are **not** visible on the Agent
+Identity in the portal or through `oauth2PermissionGrants` — they only appear in
+the runtime token, which is why step **c** reads the log rather than the portal.
 
 **c. Find the location the runtime reports**
 
