@@ -181,12 +181,70 @@ If you get `Request_MultipleObjectsWithSameKeyValue`, a grant already exists —
 
 ## 5. Azure
 
+### What you need before deploying
+
 | Requirement | Notes |
 |---|---|
 | Subscription | Same tenant as the licences avoids cross-tenant friction |
 | Azure OpenAI resource with a chat deployment | This sample uses the direct Azure OpenAI endpoint; Foundry project endpoints require the `langchain-azure-ai` integration |
-| **Cognitive Services OpenAI User** | For you locally and for the app's managed identity |
-| Region with ACR Tasks | Needed for server-side image builds; may differ from the app's region |
+| Model quota | The deployment needs enough TPM to serve turns. A new resource may start at a low default |
+| Region for the app | Container Apps must be available there |
+| Region for the registry | Needs **ACR Tasks** for server-side builds. It does not have to match the app's region |
+| Resource providers registered | `Microsoft.App`, `Microsoft.OperationalInsights`, `Microsoft.ContainerRegistry` |
+
+### Permissions to run the deployment
+
+Two different things, and the second is the one people miss:
+
+| To do | You need |
+|---|---|
+| Create the resource group, registry, workspace, environment, and app | **Contributor** on the subscription or target resource group |
+| Assign roles to the app's managed identity | **Owner**, **User Access Administrator**, or **Role Based Access Control Administrator** |
+
+`Contributor` alone cannot create role assignments. Without one of the second
+set, the script provisions everything and then fails at `az role assignment
+create` — leaving an app that cannot reach the model.
+
+You also need **Cognitive Services OpenAI User** on the model account for
+yourself, so you can run the agent locally with `az login`.
+
+### What the deployment creates
+
+`infra/deploy-azure.sh` provisions one isolated set per agent:
+
+| Resource | Configuration |
+|---|---|
+| Resource group | `rg-agent365-<agent>-<location>` |
+| Container registry | Basic SKU, admin user disabled — image pull uses managed identity |
+| Log Analytics workspace | Backs the Container Apps environment and holds console logs |
+| Container Apps environment | One per agent in this sample |
+| Container app | 1.0 vCPU, 2 GiB, min and max 1 replica, external ingress on port 8080, system-assigned identity |
+
+It then assigns the app's managed identity:
+
+| Role | Scope |
+|---|---|
+| Cognitive Services OpenAI User | The Azure OpenAI account |
+| Reader | The subscription, so the Azure tools can inspect it |
+
+Everything is idempotent, so re-running it ships a new build rather than
+duplicating resources.
+
+### Cost and cleanup
+
+The app is pinned to a single always-on replica, so it bills continuously rather
+than scaling to zero. Registry and Log Analytics add a small amount; the model is
+billed per token. Set `--min-replicas 0` if you would rather trade cold starts
+for lower cost in a demo environment.
+
+Remove everything with:
+
+```bash
+az group delete --name rg-agent365-<agent>-<location>
+```
+
+The Azure OpenAI resource is **not** created by the script, so it survives that
+delete and can be shared across several agents.
 
 ---
 
@@ -198,13 +256,34 @@ az account show             # correct subscription and tenant
 a365 -h                     # CLI resolves
 ```
 
+Azure side:
+
+```bash
+# Can you assign roles, not just create resources?
+az role assignment list --assignee $(az ad signed-in-user show --query id -o tsv) \
+  --scope /subscriptions/$(az account show --query id -o tsv) \
+  --query '[].roleDefinitionName' -o tsv
+
+# Providers registered
+az provider show -n Microsoft.App --query registrationState -o tsv
+az provider show -n Microsoft.OperationalInsights --query registrationState -o tsv
+az provider show -n Microsoft.ContainerRegistry --query registrationState -o tsv
+
+# Model deployment exists
+az cognitiveservices account deployment list \
+  -n <aoai-name> -g <aoai-rg> --query '[].name' -o tsv
+```
+
 Checklist:
 
 - [ ] Agent 365 licences available, not fully consumed
 - [ ] Your account holds a role that can create agents
 - [ ] `Agent 365 CLI` app exists with all seven delegated permissions consented
 - [ ] `wids` claim added
-- [ ] Azure subscription selected, model deployed, roles assigned
+- [ ] Azure subscription selected and model deployed
+- [ ] You can create **role assignments**, not only resources
+- [ ] Resource providers registered
+- [ ] Chosen registry region supports ACR Tasks
 
 ---
 
@@ -219,6 +298,11 @@ Checklist:
 | Instance creation fails silently | No Agent 365 licence available |
 | Work IQ returns nothing | Missing Copilot licence, or servers not added |
 | CLI command does not exist | Version drift — check `a365 --version` |
+| Deploy creates resources then fails on `az role assignment create` | You have Contributor but not Owner, User Access Administrator, or RBAC Administrator |
+| `az acr build` fails with `NoRegisteredProviderFound` | The registry region does not offer ACR Tasks — set `ACR_LOCATION` to one that does |
+| `MissingSubscriptionRegistration` | Register `Microsoft.App`, `Microsoft.OperationalInsights`, or `Microsoft.ContainerRegistry` |
+| Agent deploys but model calls fail with 401 or 403 | The app's managed identity lacks **Cognitive Services OpenAI User** on the model account |
+| Model calls fail with 429 | Deployment TPM quota is too low for the traffic |
 
 Anything beyond onboarding is in [Troubleshooting](troubleshooting.md).
 
