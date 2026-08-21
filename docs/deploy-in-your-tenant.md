@@ -19,6 +19,10 @@ in this guide requires editing application code — only configuration.
 The signed-in identity also needs **Cognitive Services OpenAI User** on the
 Azure OpenAI account, because this agent never uses an API key.
 
+If the tenant has not been onboarded to Agent 365 before — licences, Entra
+roles, CLI install, client app registration and consent — do
+[Prerequisites and tenant onboarding](prerequisites.md) first.
+
 ---
 
 ## Values you must change

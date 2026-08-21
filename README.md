@@ -10,6 +10,7 @@ mail, modify calendars, change documents, or alter Azure resources.
 
 | Guide | Read it for |
 |---|---|
+| [Prerequisites and tenant onboarding](docs/prerequisites.md) | Licences, Entra roles, CLI install, and the client app registration a new tenant needs |
 | [Capabilities and permissions](docs/capabilities-and-permissions.md) | What the agent can do, every permission it holds, and where to inspect or change them |
 | [Architecture](docs/architecture.md) | Diagrams of the components, startup, one turn, identity, telemetry, and routes |
 | [Deploy in your tenant](docs/deploy-in-your-tenant.md) | Clone to running agent, and every value you must change |
@@ -123,6 +124,11 @@ audiences differ.
 4. The **Cognitive Services OpenAI User** role on that resource for your account
 5. Reader on the subscription you want the Azure tools to inspect
 6. For Agent 365 features: the `a365` CLI and a tenant onboarded to Agent 365
+
+If the tenant has never run Agent 365, start with
+[Prerequisites and tenant onboarding](docs/prerequisites.md) — it covers
+licences, Entra roles, installing the CLI, and the client app registration and
+admin consent the CLI depends on.
 
 ---
 
