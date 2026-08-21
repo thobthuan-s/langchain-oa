@@ -87,6 +87,16 @@ This creates the Blueprint, configures its permissions, and writes the Activity
 Protocol connection settings. The child Agent Identity and agent user are
 created later, when the AI Teammate instance is approved and provisioned.
 
+> **Consent during `a365 setup all`.** This step grants the Blueprint its own
+> permissions — Microsoft Graph, Work IQ, Agent 365 Observability, and the
+> messaging/Activity Protocol scopes — which is separate from the one-time CLI
+> client app consent in
+> [Prerequisites and tenant onboarding](prerequisites.md). Expect one or more
+> admin-consent prompts. If you are not a Global Administrator, `a365 setup all`
+> still completes and prints the consent URLs for an admin to open; there is no
+> separate CLI command for that step.
+> ([Quickstart: Connect an existing agent to Agent 365](https://learn.microsoft.com/microsoft-agent-365/developer/get-started))
+
 > On macOS the generated config may contain the Blueprint secret in plain text.
 > Never commit it, and rotate it if it is printed. See the auth-mode section of
 > the README for the keyless alternative.
@@ -98,23 +108,39 @@ a365 develop add-mcp-servers      # regenerates ToolingManifest.json
 a365 setup permissions mcp
 ```
 
-Do not reuse another tenant's `ToolingManifest.json`. Server audiences and
-availability differ.
+Do not reuse another tenant's `ToolingManifest.json`. Server availability and
+metadata differ per tenant even though the underlying Microsoft service IDs are
+constant.
 
 ---
 
-## Step 3 — Publish and create the instance
+## Step 3 — Publish, upload, and create the instance
 
 ```bash
 a365 publish                       # produces manifest/manifest.zip
 ```
 
-Upload `manifest.zip` in the Microsoft 365 admin centre under **Agents →
-Upload custom agent**. Then create the instance and assign an Agent 365 licence
-to the agent user.
+`a365 publish` updates `manifest.json` with the Blueprint ID, packages it with
+the icons into `manifest.zip`, and prints upload instructions.
+([Publish agent to Microsoft admin center](https://learn.microsoft.com/microsoft-agent-365/developer/publish))
 
-Instance creation requires admin approval, so expect a request-and-approve step
-rather than immediate provisioning.
+**Upload** — requires Global Administrator:
+
+1. Go to [admin.microsoft.com](https://admin.microsoft.com)
+2. **Agents → All agents**
+3. **Upload custom agent**
+4. Upload `manifest/manifest.zip`
+
+Allow 5–10 minutes for the agent to appear in the admin centre and in Teams.
+
+**Create the instance** — this is a separate step from upload, and it is a
+request-and-approve flow, not immediate provisioning: a user requests an
+instance from Teams, the request routes to the tenant admin, and the admin
+approves it from **Microsoft 365 admin centre → Agents → Requests**. Only after
+approval does Teams create the agent instance and the agent user.
+([Create agent instance](https://learn.microsoft.com/microsoft-agent-365/developer/create-instance))
+
+Then assign an Agent 365 licence to the new agent user.
 
 ---
 
@@ -160,6 +186,16 @@ Finally, send a message from Microsoft 365 and confirm a reply.
 
 Only do this if you want prompt and response **content** captured. Observability
 alone records that the agent ran, never what was said.
+
+> **Group-scoped policies may already cover this.** Some tenants have a
+> tenant-wide capture policy — for example Microsoft's built-in "Capture
+> interactions for enterprise AI apps" — that evaluates every agent without a
+> per-agent policy. Confirm from the runtime log in step **c** below before
+> assuming you need step **d**: if `protectionScopes.compute` returns a
+> non-empty `executionMode` for your agent's location, a policy is already
+> applying, and you may only need to verify the ingestion result in Activity
+> Explorer rather than create a new policy. Only continue to step **d** when no
+> policy applies, or when the applying policy does not have ingestion enabled.
 
 **a. Turn it on**
 

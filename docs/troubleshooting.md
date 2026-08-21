@@ -132,6 +132,32 @@ or base64 `UEsDB` can be unzipped and `word/document.xml` parsed.
 
 ---
 
+## `GET /` returns 401 in the logs
+
+**Symptom.** Recurring log lines with no visible trigger:
+
+```text
+aiohttp.access:100.100.0.x [..] "GET / HTTP/1.1" 401 212 "-" "python-requests/2.32.4"
+```
+
+**What it is.** `/` is not a registered route — only `/api/messages`,
+`/api/health`, and optionally `/eval/invoke` are. The JWT middleware runs before
+routing resolves a 404, and rejects any path outside its anonymous allowlist, so
+an unauthenticated request to `/` gets `401` instead of `404`.
+
+The source address range (`100.100.0.0/16`) and the regular interval are
+consistent with an internal Azure Container Apps platform probe rather than
+external traffic. This has not been confirmed against Azure's own
+documentation of that address range — treat it as a likely explanation, not a
+verified one.
+
+**Is it a problem?** No. It demonstrates the auth boundary is fail-closed:
+anything other than the explicit anonymous paths is rejected regardless of
+whether the route exists. Do not add `/` to the anonymous path list to silence
+it; that would remove real protection to hide a log line.
+
+---
+
 ## Purview captures nothing
 
 **Symptom.** `processContent` returns `200`, but no text appears in Activity

@@ -6,6 +6,9 @@ built and deployed. Written for a tenant that has not run Agent 365 before.
 Official references:
 [Agent 365 CLI](https://learn.microsoft.com/microsoft-agent-365/developer/agent-365-cli) ·
 [Custom client app registration](https://learn.microsoft.com/microsoft-agent-365/developer/custom-client-app-registration) ·
+[Quickstart: Connect an existing agent](https://learn.microsoft.com/microsoft-agent-365/developer/get-started) ·
+[Publish agent](https://learn.microsoft.com/microsoft-agent-365/developer/publish) ·
+[Create agent instance](https://learn.microsoft.com/microsoft-agent-365/developer/create-instance) ·
 [Microsoft OpenTelemetry Distro](https://learn.microsoft.com/microsoft-agent-365/developer/microsoft-opentelemetry)
 
 ---
