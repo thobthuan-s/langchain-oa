@@ -75,11 +75,26 @@ revision even when the image changed.
 
 ## Step 2 — Agent 365 registration
 
+The validated command for this agent:
+
+```bash
+a365 setup all --agent-name <your-agent-name> --aiteammate --m365 --verbose
+```
+
+| Flag | Effect |
+|---|---|
+| `--agent-name` | Runs config-free. Derives blueprint and identity display names, auto-detects the tenant from `az account show`, resolves the client app by looking up `Agent 365 CLI` |
+| `--aiteammate` | Provisions blueprint and permissions for an agent that gets its own user account. Overrides the `aiTeammate` field in a config file |
+| `--m365` | Registers the messaging endpoint through the MCP platform. Opt-in; omit for non-M365 agents |
+
+Use a config file instead of `--agent-name` when you need values the flags cannot
+derive — agent user principal name, manager, usage location, or a specific
+blueprint display name:
+
 ```bash
 cp a365.config.template.json a365.config.json
 # fill in: clientAppId, subscriptionId, tenantId, managerEmail,
 #          agentUserPrincipalName, messagingEndpoint, blueprint display name
-
 a365 setup all --verbose
 ```
 

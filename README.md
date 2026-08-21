@@ -314,24 +314,28 @@ deployed environment.
 
 ## Registering with Agent 365
 
-AI teammates need a hand-authored `a365.config.json` before running setup — the
-config-free `--agent-name` flow is for standard agents without their own user
-account, which this agent is not.
-
 ```bash
-# 1. Fill in tenant, subscription, owner, and blueprint fields
-cp a365.config.template.json a365.config.json
+# 1. Provision the Blueprint and AI Teammate identity
+a365 setup all --agent-name <your-agent-name> --aiteammate --m365 --verbose
 
-# 2. Provision the Blueprint and AI Teammate identity from that file
-a365 setup all --verbose
-
-# 3. Choose Work IQ servers from the live catalog
+# 2. Choose Work IQ servers from the live catalog
 a365 develop list-available
 a365 develop add-mcp-servers "mcp_SharePointRemoteServer" "mcp_MailTools" "mcp_CalendarTools"
 
-# 4. Package for upload
+# 3. Package for upload
 a365 publish
 ```
+
+`--agent-name` runs config-free: the CLI derives the blueprint and identity
+display names, auto-detects the tenant from `az account show`, and resolves the
+client app by looking up `Agent 365 CLI`. `--aiteammate` provisions the blueprint
+and permissions for an agent that gets its own user account, and overrides the
+`aiTeammate` field if a config file is present. `--m365` registers the messaging
+endpoint through the MCP platform.
+
+Use `a365.config.json` instead of `--agent-name` when you need to set fields the
+flags cannot derive — agent user principal name, manager, usage location, or a
+specific blueprint display name.
 
 Upload the generated `manifest.zip` in the Microsoft 365 admin center under
 **Agents → Upload custom agent**, then approve the instance creation request.
@@ -423,13 +427,13 @@ tar -tzf ../langchain-oa.tgz          # expect templates only, no .env
 # 1. Infrastructure — prints the messaging endpoint when it finishes
 bash infra/deploy-azure.sh
 
-# 2. Agent 365 configuration — required before setup for an AI teammate
+# 2. Agent 365 configuration — only needed for fields the flags cannot derive
 cp a365.config.template.json a365.config.json
 #    fill in: clientAppId, subscriptionId, tenantId, managerEmail,
 #             agentUserPrincipalName, messagingEndpoint
 
-# 3. Register from that file, then package
-a365 setup all --verbose
+# 3. Register, then package
+a365 setup all --agent-name <your-agent-name> --aiteammate --m365 --verbose
 a365 publish
 ```
 
