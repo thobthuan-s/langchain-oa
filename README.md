@@ -10,6 +10,7 @@ mail, modify calendars, change documents, or alter Azure resources.
 
 | Guide | Read it for |
 |---|---|
+| [Capabilities and permissions](docs/capabilities-and-permissions.md) | What the agent can do, every permission it holds, and where to inspect or change them |
 | [Architecture](docs/architecture.md) | Diagrams of the components, startup, one turn, identity, telemetry, and routes |
 | [Deploy in your tenant](docs/deploy-in-your-tenant.md) | Clone to running agent, and every value you must change |
 | [Troubleshooting](docs/troubleshooting.md) | Real failure modes, their causes, and fixes |
