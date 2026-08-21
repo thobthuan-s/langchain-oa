@@ -25,7 +25,8 @@ flowchart TD
 ```
 
 Steps 1, 2, and 4 are one-time tenant work and usually need an administrator.
-Steps 3 and 5 are per developer.
+Steps 3 and 5 are per developer. Step 6, Microsoft Purview, is optional and only
+needed if you want prompt and response content captured.
 
 ---
 
@@ -245,6 +246,35 @@ az group delete --name rg-agent365-<agent>-<location>
 
 The Azure OpenAI resource is **not** created by the script, so it survives that
 delete and can be shared across several agents.
+
+---
+
+## 6. Microsoft Purview (only for content capture)
+
+Skip this unless you want prompt and response **content** captured or blocked.
+The agent runs fine without it, and it is disabled by default.
+
+Observability and Purview answer different questions. Observability records that
+the agent ran and what it called. Only Purview records what was actually said.
+
+| Requirement | Notes |
+|---|---|
+| Auditing enabled for the organisation | Required before captured content appears in Purview |
+| Licensing that covers DSPM for AI | Confirm against your tenant's Purview entitlements |
+| An admin who can manage Purview policies | Needed to run `Connect-IPPSSession` and create the collection policy — for example Compliance Administrator |
+| **Content Explorer Content Viewer** | Needed to *read* captured text; without it rows appear with no content |
+| Exchange Online mailbox on the agent user | Content renders blank without one |
+| Three delegated Graph scopes | `Content.Process.User`, `ProtectionScopes.Compute.User`, `ContentActivity.Write` — see [Deploy in your tenant](deploy-in-your-tenant.md) step 6 |
+
+Two things that decide whether it works at all:
+
+- The DSPM collection policy must have **ingestion enabled**, or you get policy
+  matches with no text.
+- It must be scoped to the identity the **runtime reports**, not the Blueprint.
+  Take that GUID from the log, not from config.
+
+Also check whether a tenant-wide capture policy already covers your agent before
+creating a per-agent one.
 
 ---
 
