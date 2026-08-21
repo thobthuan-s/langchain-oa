@@ -86,7 +86,12 @@ each server's current URL, OAuth audience, and scope from that file.
 ## Blueprint authentication modes
 
 The model calls are always keyless — `DefaultAzureCredential` plus the
-**Cognitive Services OpenAI User** role, never an API key.
+**Cognitive Services OpenAI User** role, never an API key. That credential is
+convenient for a sample because it resolves `az login` locally and the managed
+identity in Azure without branching; in production, pin the identity instead of
+letting it be inferred. See
+[Credentials](docs/architecture.md#7-credentials) for the alternatives and the
+roles each one needs.
 
 Proving that this agent *is* the Blueprint app is a separate decision, set by
 `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__AUTHTYPE`:

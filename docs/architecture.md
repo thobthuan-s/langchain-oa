@@ -187,7 +187,80 @@ confirm an unauthenticated `POST /api/messages` returns `401`.
 
 ---
 
-## 7. Why this shape
+## 7. Credentials
+
+Every Azure call in this agent is keyless. There is no API key for the model and
+no connection string for the tools — only Entra tokens plus RBAC.
+
+The sample uses `DefaultAzureCredential` for both the model and the Azure tools:
+
+```python
+azure_ad_token_provider=get_bearer_token_provider(
+    DefaultAzureCredential(),
+    "https://cognitiveservices.azure.com/.default",
+)
+```
+
+It tries a chain of sources and uses the first that works:
+
+```mermaid
+flowchart LR
+    E[Environment vars] --> W[Workload identity]
+    W --> M[Managed identity]
+    M --> C[Shared cache]
+    C --> A[azd / az CLI]
+    A --> I[Interactive]
+```
+
+That is why the same code runs locally under `az login` and in Container Apps
+under the managed identity, with no branching. For a sample, that is the point.
+
+### Where it bites in production
+
+| Risk | Consequence |
+|---|---|
+| More than one identity on the host | It may select the wrong one |
+| Probing failed sources | Slower startup, notably IMDS |
+| Succeeds as your developer account locally | Hides a missing role assignment until production |
+
+### Alternatives
+
+| Credential | Use for |
+|---|---|
+| `ManagedIdentityCredential(client_id=...)` | Production in Azure. Explicit and fastest |
+| `WorkloadIdentityCredential` | AKS federated identity |
+| `ChainedTokenCredential(...)` | Deterministic local plus cloud |
+| `AzureCliCredential` | Local development only |
+| `ClientSecretCredential` / `CertificateCredential` | An app registration acting as itself |
+| `EnvironmentCredential` | CI and CD |
+
+You can also keep `DefaultAzureCredential` and simply remove the ambiguity:
+
+```python
+DefaultAzureCredential(
+    managed_identity_client_id=os.environ["UAMI_CLIENT_ID"],
+    exclude_interactive_browser_credential=True,
+    exclude_shared_token_cache_credential=True,
+)
+```
+
+**Recommendation.** Keep the default for samples and development. In production,
+pin the identity — either pass `managed_identity_client_id` or use
+`ManagedIdentityCredential` directly — so identity selection is never inferred.
+This is the same principle behind preferring federated credentials over a client
+secret for the Blueprint: explicit identity beats implicit.
+
+Roles the chosen identity needs:
+
+| Scope | Role |
+|---|---|
+| Azure OpenAI account | Cognitive Services OpenAI User |
+| Subscription or resource groups to inspect | Reader |
+| Log Analytics workspace | Log Analytics Reader, for the query tools |
+
+---
+
+## 8. Why this shape
 
 | Decision | Reason |
 |---|---|
