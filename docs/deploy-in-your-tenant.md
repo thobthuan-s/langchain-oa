@@ -14,7 +14,7 @@ in this guide requires editing application code — only configuration.
 | `a365` CLI | Signed in as an admin |
 | Azure CLI | `az login` |
 | Azure OpenAI resource | With a chat deployment |
-| Roles | Global Administrator, or Agent ID Administrator plus Agent Registry Administrator |
+| Roles | Agent ID Administrator or Developer for build/deploy; Agent Registry Administrator for registration; an admin role that can grant consent |
 
 The signed-in identity also needs **Cognitive Services OpenAI User** on the
 Azure OpenAI account, because this agent never uses an API key.
@@ -27,7 +27,9 @@ roles, CLI install, client app registration and consent — do
 
 ## Values you must change
 
-Everything below is environment-specific. Nothing else should need editing.
+Everything below is environment-specific. The verified `ClientSecret` path
+needs variable changes only; changing framework, model-provider shape, or
+Blueprint authentication mode is a separate migration.
 
 | Value | Where | Notes |
 |---|---|---|
@@ -81,8 +83,9 @@ cp a365.config.template.json a365.config.json
 a365 setup all --verbose
 ```
 
-This creates the Blueprint, its child Agent Identity, permissions, and the
-Activity Protocol connection settings.
+This creates the Blueprint, configures its permissions, and writes the Activity
+Protocol connection settings. The child Agent Identity and agent user are
+created later, when the AI Teammate instance is approved and provisioned.
 
 > On macOS the generated config may contain the Blueprint secret in plain text.
 > Never commit it, and rotate it if it is printed. See the auth-mode section of
@@ -124,6 +127,9 @@ rather than immediate provisioning.
 This reads the generated configuration and pushes the Activity Protocol,
 agentic auth, Blueprint, and observability values into the Container App,
 storing the Blueprint credential as a secret reference rather than a literal.
+This script implements the verified `ClientSecret` path. Federated credentials
+require the Agents SDK 1.x line plus different deployment plumbing; they are not
+enabled by changing `AUTHTYPE` alone.
 
 ---
 

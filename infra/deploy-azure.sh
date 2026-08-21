@@ -4,7 +4,7 @@
 set -euo pipefail
 
 AGENT_NAME="${AGENT_NAME:-langchainoa}"
-LOCATION="${LOCATION:-malaysiawest}"
+LOCATION="${LOCATION:-}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-agent365-${AGENT_NAME}-${LOCATION}}"
 APP_NAME="${APP_NAME:-${AGENT_NAME}}"
 ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-cae-${AGENT_NAME}}"
@@ -17,7 +17,7 @@ REGISTRY_NAME="${REGISTRY_NAME:-acr${REGISTRY_STEM}${SUBSCRIPTION_SUFFIX}}"
 # ACR Tasks (server-side `az acr build`) is not offered in every region. When the
 # app region lacks it, set ACR_LOCATION to a supported one — the registry region
 # does not have to match the container app region.
-ACR_LOCATION="${ACR_LOCATION:-southeastasia}"
+ACR_LOCATION="${ACR_LOCATION:-$LOCATION}"
 
 AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-}"
@@ -28,6 +28,7 @@ ENABLE_PURVIEW="${ENABLE_PURVIEW:-false}"
 PURVIEW_ENFORCE_BLOCKS="${PURVIEW_ENFORCE_BLOCKS:-false}"
 
 require() { [[ -n "${2:-}" ]] || { echo "ERROR: $1 is required" >&2; exit 1; }; }
+require LOCATION "$LOCATION"
 require AZURE_OPENAI_ENDPOINT "$AZURE_OPENAI_ENDPOINT"
 require AZURE_OPENAI_DEPLOYMENT "$AZURE_OPENAI_DEPLOYMENT"
 

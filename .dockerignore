@@ -1,4 +1,5 @@
 .venv/
+.git/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -13,5 +14,7 @@ a365.generated.config.*.bak.json
 
 manifest/
 tests/
+docs/
 *.zip
+*.tgz
 README.md

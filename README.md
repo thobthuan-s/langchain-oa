@@ -23,7 +23,7 @@ mail, modify calendars, change documents, or alter Azure resources.
 | Surface | Microsoft 365 / Teams | Activity Protocol on `/api/messages` |
 | Host | Microsoft 365 Agents SDK | aiohttp |
 | Orchestration | LangChain | `create_agent` |
-| Model | Azure OpenAI | Keyless via managed identity — no API key |
+| Model | Azure OpenAI | Keyless via `DefaultAzureCredential` — no API key |
 | M365 data | Work IQ MCP | SharePoint, mail, calendar — read-only |
 | Azure data | Azure SDKs | Resource Manager, Monitor, Log Analytics |
 | Telemetry | Microsoft OpenTelemetry Distro | Optional Agent 365 export |
@@ -73,7 +73,7 @@ langchain-oa/
 │
 ├── tests/                      contract tests for the risky parts
 ├── infra/                      deploy, settings sync, packaging
-├── docs/                       architecture, deployment, troubleshooting
+├── docs/                       onboarding, permissions, architecture, deployment, troubleshooting
 │
 ├── a365.config.template.json   copy to a365.config.json and fill in
 ├── .env.template               copy to .env and fill in
@@ -91,7 +91,7 @@ langchain-oa/
 | `langchain_agent.py` | The only file that knows about LangChain. Replace it to use another framework |
 | `aoai_model.py` | One place to change model provider or credential |
 | `observability.py` / `purview.py` | Governance is additive. Both degrade to no-ops when disabled |
-| `config.py` | Every setting is declared and typed. Nothing reads `os.environ` ad hoc |
+| `config.py` | Application settings are declared and typed; the host also reads standard Agents SDK connection variables |
 | `agent-prompt.txt` | Behaviour changes need no rebuild |
 | `tools/` | Capability boundary. Deleting a tool removes the capability — the prompt is not a control |
 | `infra/` | Deployment is reproducible and reviewable, not a sequence of portal clicks |
@@ -111,8 +111,8 @@ git-ignored. You will see them locally but never in the repository.
 
 `ToolingManifest.json` is the exception: it is committed because it holds public
 server metadata — URL, OAuth audience, scope — and no credentials. Regenerate it
-per tenant with `a365 develop add-mcp-servers`, as server availability and
-audiences differ.
+for each tenant with `a365 develop add-mcp-servers`: the Microsoft service app
+IDs are product constants, while catalog availability and metadata can evolve.
 
 ---
 
@@ -148,7 +148,7 @@ Proving that this agent *is* the Blueprint app is a separate decision, set by
 | Mode | Use for | Tradeoff |
 |---|---|---|
 | `ClientSecret` (default) | Prototypes and demos | A real secret exists: it can leak, must be rotated, and expires |
-| `FederatedCredentials` | Production | Keyless. The Blueprint app trusts a managed identity, so there is no secret to store or rotate |
+| `FederatedCredentials` | Production migration target after an SDK/deployment upgrade | Keyless. The Blueprint app trusts a managed identity, so there is no secret to store or rotate |
 
 > **Caveat.** This sample ships `ClientSecret` because it is the fastest path to
 > a working agent, and because `FederatedCredentials` is not implemented in the
@@ -177,7 +177,8 @@ Validated end to end on this stack: Teams turns, Work IQ SharePoint search,
 Agent 365 observability export, and Purview prompt/response capture.
 
 `FederatedCredentials` requires the Agents SDK 1.x line and has **not** been
-validated here.
+validated here. The included `sync-a365-settings.sh` implements the verified
+`ClientSecret` path only; changing `AUTHTYPE` alone is not a supported migration.
 
 ---
 
@@ -371,7 +372,7 @@ If your app region does not offer ACR Tasks, point the registry elsewhere — th
 two regions do not have to match:
 
 ```bash
-export ACR_LOCATION=southeastasia
+export ACR_LOCATION=<region-with-acr-tasks>
 ```
 
 Every run tags the image with a timestamp. Updating an unchanged `:latest` tag
@@ -390,12 +391,16 @@ from the container image.
 
 ### Packaging it to hand over
 
-`.gitignore` covers git and `.dockerignore` covers the image, but neither applies
-to a plain copy or zip. Build the archive explicitly:
+`.gitignore` controls tracked source and `.dockerignore` controls the image, but
+neither protects an ad-hoc copy or zip. Build the archive explicitly:
 
 ```bash
 infra/package-share.sh ../langchain-oa.tgz
 ```
+
+In a Git clone, the script packages committed files only with `git archive`, so
+ignored and untracked local files cannot slip in. Commit intended changes first.
+The fallback for a source download applies an explicit exclusion list.
 
 Verify before sending:
 

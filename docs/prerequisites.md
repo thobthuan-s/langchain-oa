@@ -54,7 +54,7 @@ error. Check consumption before blaming configuration.
 
 | Role | Can do |
 |---|---|
-| **Global Administrator** | Everything, including consent |
+| **Global Administrator** | Tenant-wide administration and consent; do not assume it replaces Agent Registry Administrator for registration workflows |
 | **Agent ID Administrator** | Manage blueprints and agent identities |
 | **Agent ID Developer** | Create and deploy agents |
 | **Agent Registry Administrator** | Register agent instances |
@@ -181,7 +181,7 @@ If you get `Request_MultipleObjectsWithSameKeyValue`, a grant already exists —
 | Requirement | Notes |
 |---|---|
 | Subscription | Same tenant as the licences avoids cross-tenant friction |
-| Azure OpenAI resource with a chat deployment | Or a Foundry project |
+| Azure OpenAI resource with a chat deployment | This sample uses the direct Azure OpenAI endpoint; Foundry project endpoints require the `langchain-azure-ai` integration |
 | **Cognitive Services OpenAI User** | For you locally and for the app's managed identity |
 | Region with ACR Tasks | Needed for server-side image builds; may differ from the app's region |
 

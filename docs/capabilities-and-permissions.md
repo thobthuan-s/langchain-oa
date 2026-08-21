@@ -67,23 +67,24 @@ flowchart TD
     AI[Agent Identity]
     AI -->|delegated OBO| G[Microsoft Graph]
     AI -->|per-audience| W[Work IQ MCP servers]
-    AI -->|app role| O[Agent 365 Observability]
-    AI -->|app role| B[Messaging / Activity Protocol]
+    AI -->|delegated grant| O[Agent 365 Observability]
+    AI -->|delegated grant| B[Messaging / Activity Protocol]
 
     MI[Container App managed identity] -->|Azure RBAC| AZ[Azure OpenAI, ARM, Monitor]
 ```
 
 ### 1. Microsoft Graph — delegated, via the Agent Identity
 
-Granted by `a365 setup all`, and used for directory context and Purview.
+`a365 setup all` grants a broad default Graph set. LangchainOA itself calls
+Microsoft Graph directly only for the optional Purview flow; SharePoint, Mail,
+and Calendar content goes through Work IQ, not through these Graph scopes.
 
-| Scope | Needed for |
+| Scope | Status in this sample |
 |---|---|
-| `User.Read.All` | Resolve people referenced in a request |
-| `Sites.Read.All` | SharePoint content |
-| `Chat.ReadWrite`, `ChannelMessage.Read.All`, `ChannelMessage.Send` | Teams conversation |
-| `Mail.ReadWrite`, `Mail.Send`, `Files.ReadWrite.All` | Granted by the default template |
-| `Content.Process.User`, `ProtectionScopes.Compute.User`, `ContentActivity.Write` | Purview only |
+| `User.Read.All`, `Sites.Read.All` | Granted by the default template; application code does not call them |
+| `Chat.ReadWrite`, `ChannelMessage.Read.All`, `ChannelMessage.Send` | Granted by the default template; Activity Protocol messaging uses the Agent Data permission instead |
+| `Mail.ReadWrite`, `Mail.Send`, `Files.ReadWrite.All` | Granted by the default template; application code does not call them |
+| `Content.Process.User`, `ProtectionScopes.Compute.User`, `ContentActivity.Write` | Used by `purview.py` when Purview is enabled |
 
 > **Least privilege.** The default template grants write scopes — `Mail.Send`,
 > `Mail.ReadWrite`, `Files.ReadWrite.All` — that this agent never uses. The code
@@ -101,8 +102,9 @@ by the others, so the agent exchanges one token per server, per turn.
 | `mcp_MailTools` | `Tools.ListInvoke.All` |
 | `mcp_CalendarTools` | `Tools.ListInvoke.All` |
 
-Audiences live in `ToolingManifest.json` and are read at runtime, never
-hard-coded. Regenerate that file per tenant.
+`ToolingManifest.json` is the preferred runtime source. The code also carries
+Microsoft's current server metadata as a fallback for local/bootstrap use.
+Regenerate the manifest per tenant rather than relying on that fallback.
 
 ### 3. Agent 365 platform
 
@@ -120,8 +122,8 @@ Separate from Entra permissions. Assigned by `infra/deploy-azure.sh`.
 | Scope | Role |
 |---|---|
 | Azure OpenAI account | Cognitive Services OpenAI User |
-| Subscription or resource groups | Reader |
-| Log Analytics workspace | Log Analytics Reader |
+| Subscription | Reader in the sample, so ARM, metrics, and logs can be inspected |
+| Narrower production alternative | Reader on selected resource groups plus Log Analytics Reader on selected workspaces |
 
 ---
 
@@ -143,7 +145,7 @@ Separate from Entra permissions. Assigned by `infra/deploy-azure.sh`.
 
 ```bash
 az rest --method GET \
-  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$filter=clientId eq '<AGENT_IDENTITY_APP_ID>'" \
+  --url "https://graph.microsoft.com/v1.0/oauth2PermissionGrants?\$filter=clientId eq '<AGENT_IDENTITY_SERVICE_PRINCIPAL_OBJECT_ID>'" \
   --query 'value[].{resourceId:resourceId,scope:scope}' -o json
 ```
 
@@ -176,17 +178,10 @@ Adding a scope is two steps, and missing the second is a common failure: the
 Blueprint must permit it (inheritable permissions), **and** the grant must exist
 on the identity that requests the token.
 
-To trim the unused write scopes, patch the grant to the set this agent actually
-needs:
-
-```text
-User.Read.All  Sites.Read.All  Chat.ReadWrite
-ChannelMessage.Read.All  ChannelMessage.Send
-Content.Process.User  ProtectionScopes.Compute.User  ContentActivity.Write
-```
-
-Re-running `a365 setup all` reapplies the default template, so re-trim after any
-CLI re-run.
+Before trimming, inspect both the application's direct calls and the
+`AGENTIC` handler's configured scopes, then test Teams, Work IQ, observability,
+and Purview end to end. Re-running `a365 setup all` can reapply the default
+template, so re-audit after any CLI re-run.
 
 ---
 

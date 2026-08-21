@@ -2,13 +2,14 @@
 set -euo pipefail
 
 AGENT_NAME="${AGENT_NAME:-langchainoa}"
-LOCATION="${LOCATION:-malaysiawest}"
+LOCATION="${LOCATION:-}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-rg-agent365-${AGENT_NAME}-${LOCATION}}"
 APP_NAME="${APP_NAME:-${AGENT_NAME}}"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$PROJECT_DIR/.env}"
 SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-$(az account show --query id -o tsv)}"
 
+[[ -n "$LOCATION" ]] || { echo "ERROR: LOCATION is required" >&2; exit 1; }
 [[ -f "$ENV_FILE" ]] || { echo "ERROR: $ENV_FILE not found; run a365 setup all first." >&2; exit 1; }
 
 read_value() {

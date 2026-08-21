@@ -207,10 +207,12 @@ It tries a chain of sources and uses the first that works:
 flowchart LR
     E[Environment vars] --> W[Workload identity]
     W --> M[Managed identity]
-    M --> C[Shared cache]
-    C --> A[azd / az CLI]
-    A --> I[Interactive]
+  M --> D[Developer credentials<br/>VS Code / az / PowerShell / azd]
 ```
+
+Exact developer credentials depend on the installed Azure Identity version.
+Interactive browser authentication is not part of the default chain unless it
+is explicitly enabled.
 
 That is why the same code runs locally under `az login` and in Container Apps
 under the managed identity, with no branching. For a sample, that is the point.
@@ -255,8 +257,8 @@ Roles the chosen identity needs:
 | Scope | Role |
 |---|---|
 | Azure OpenAI account | Cognitive Services OpenAI User |
-| Subscription or resource groups to inspect | Reader |
-| Log Analytics workspace | Log Analytics Reader, for the query tools |
+| Subscription | Reader in the sample |
+| Narrower production alternative | Reader on selected resource groups plus Log Analytics Reader on selected workspaces |
 
 ---
 
