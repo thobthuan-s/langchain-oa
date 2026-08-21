@@ -1,0 +1,22 @@
+# Secrets and environment
+.env
+.env.*
+!.env.template
+
+# Agent 365 generated configuration — contains tenant and credential material
+a365.config.json
+a365.generated.config.json
+a365.generated.config.*.bak.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build output
+manifest/
+*.zip
+
+# macOS
+.DS_Store

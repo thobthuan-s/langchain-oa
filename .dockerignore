@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets and generated configuration must never enter the image
+.env
+.env.*
+!.env.template
+a365.config.json
+a365.generated.config.json
+a365.generated.config.*.bak.json
+
+manifest/
+tests/
+*.zip
+README.md

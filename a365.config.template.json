@@ -1,0 +1,19 @@
+{
+  "agentUserDisplayName": "LangchainOA",
+  "clientAppId": "<AGENT365_CLI_CLIENT_APP_ID>",
+  "deploymentProjectPath": ".",
+  "agentUserUsageLocation": "US",
+  "managerEmail": "<OWNER_UPN>",
+  "aiTeammate": true,
+  "subscriptionId": "<SUBSCRIPTION_ID>",
+  "agentDescription": "LangchainOA - read-only operations and knowledge AI Teammate",
+  "resourceGroup": "rg-agent365-langchainoa-<LOCATION>",
+  "location": "<LOCATION>",
+  "agentBlueprintDisplayName": "LangchainOA",
+  "agentUserPrincipalName": "langchainoa@<TENANT>.onmicrosoft.com",
+  "agentIdentityDisplayName": "LangchainOA Identity",
+  "tenantId": "<TENANT_ID>",
+  "messagingEndpoint": "<CONTAINER_APP_URL>/api/messages",
+  "needDeployment": false,
+  "environment": "prod"
+}
