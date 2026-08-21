@@ -1,10 +1,68 @@
 # LangchainOA
 
-A read-only Microsoft Agent 365 **AI Teammate** built with **LangChain** and **Azure OpenAI**.
+A read-only Microsoft Agent 365 **AI Teammate** built with **LangChain** and
+**Azure OpenAI**.
 
-It searches and reads governed Microsoft 365 data through Work IQ, inspects Azure
-resources and monitoring data, and answers questions. It has no tools that send
-mail, modify calendars, change documents, or alter Azure resources.
+## What this agent is
+
+LangchainOA is an **AI Teammate**: it has its own directory identity, mailbox,
+and Teams presence, and is addressed by mentioning it like a colleague rather
+than by launching an app. It answers questions about your organisation's
+governed Microsoft 365 content and your Azure estate.
+
+It is also a **reference implementation**. Each piece of the Agent 365
+integration surface is wired end to end, in isolated files you can read, copy,
+or replace:
+
+| Concern | Where |
+|---|---|
+| Hosting and the Activity Protocol | `host.py` |
+| Orchestration | `langchain_agent.py` |
+| Model access, keyless | `aoai_model.py` |
+| Governed Microsoft 365 data | `tools/workiq_tools.py` |
+| Azure inspection | `tools/azure_tools.py` |
+| Telemetry to Agent 365 | `observability.py` |
+| Content capture and DLP | `purview.py` |
+
+## What it can do
+
+- **Find and read documents.** Search SharePoint through Work IQ, then read and
+  summarise what it finds, including text extracted from `.docx` files
+- **Read mail and calendar.** Through governed Work IQ servers, under tenant
+  policy and auditing
+- **Inspect Azure.** List resource groups and resources, read resource details
+- **Answer operational questions.** Query Azure Monitor metrics and run bounded
+  Log Analytics KQL queries
+- **Discover its own tools.** Work IQ catalogues change, so it lists what is
+  available at runtime rather than assuming a fixed set
+
+Ask it things like *"find the HR onboarding policy in SharePoint"*,
+*"what changed in my resource group this week"*, or *"summarise the open items
+in that document"*.
+
+## What it deliberately cannot do
+
+It has **no tool** that sends mail, modifies a calendar, edits a document, or
+changes an Azure resource. That is enforced by construction, not by instructions
+in a prompt: write capability is absent from the tool set, and any Work IQ tool
+whose name implies a write is rejected by an allowlist before the model can call
+it.
+
+That makes it safe to demonstrate against real tenant data.
+
+## What it demonstrates
+
+- **Entra Agent ID** — Blueprint → Agent Identity → agent user, with per-turn
+  delegated tokens derived from the incoming activity
+- **Work IQ MCP** — one OAuth audience per server, exchanged per turn
+- **Agent 365 observability** — spans that appear in the admin centre, Defender,
+  and Purview
+- **Microsoft Purview** — optional prompt and response capture, with DLP
+  evaluation and optional prompt blocking
+- **Keyless Azure access** — no model API key anywhere in the agent
+
+Orchestration is swappable. `langchain_agent.py` is the only file that knows
+about LangChain; the Agent 365 layer does not depend on it.
 
 ## Documentation
 
