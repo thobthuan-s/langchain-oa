@@ -21,6 +21,11 @@ class Settings(BaseSettings):
 
     # --- Azure read-only tools ---
     azure_subscription_id: str = ""
+    # Comma-separated Log Analytics workspace IDs that query_logs may target.
+    # Empty (default) means every workspace reachable by the service identity is
+    # permitted; this is an explicit trust decision for deployments that do not
+    # need narrower scoping.
+    azure_log_workspace_allowlist: str = ""
 
     # --- Work IQ MCP ---
     enable_workiq: bool = True

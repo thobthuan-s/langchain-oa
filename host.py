@@ -74,6 +74,11 @@ class LangchainOaHost:
         self._register_routes()
 
     def _register_routes(self) -> None:
+        if not (self.auth_handler_name and self.connection_manager) and not settings.enable_local_eval:
+            raise RuntimeError(
+                "Message routes require configured authentication "
+                "(set ENABLE_LOCAL_EVAL=true for anonymous local testing only)"
+            )
         handler_config = (
             {"auth_handlers": [self.auth_handler_name]}
             if self.auth_handler_name and self.connection_manager
@@ -218,6 +223,8 @@ class LangchainOaHost:
 
     def start(self) -> None:
         auth_configuration = self.create_auth_configuration()
+        local_eval_conversations: set[str] = set()
+        max_local_eval_conversations = 1024
 
         async def messages(request: Request) -> Response:
             return await start_agent_process(request, request.app["agent_app"], request.app["adapter"])
@@ -253,8 +260,15 @@ class LangchainOaHost:
             message = str(payload.get("message") or payload.get("input") or "").strip()
             if not message:
                 return json_response({"error": "missing message"}, status=400)
+            conversation_id = _stable_conversation_id(payload.get("conversation_id"))
+            if conversation_id not in local_eval_conversations:
+                if len(local_eval_conversations) >= max_local_eval_conversations:
+                    return json_response(
+                        {"error": "too many active local eval conversations"}, status=429
+                    )
+                local_eval_conversations.add(conversation_id)
             try:
-                response = await run_agent(message, _stable_conversation_id(payload.get("conversation_id")))
+                response = await run_agent(message, conversation_id)
             except Exception as exc:  # noqa: BLE001
                 # Surface the reason here; this route exists for local diagnosis.
                 logger.error("Local evaluation failed: %s", exc, exc_info=True)
@@ -267,8 +281,6 @@ class LangchainOaHost:
             @web_middleware
             async def jwt_with_public_endpoints(request: Request, handler):
                 public_paths = {"/api/health"}
-                if settings.enable_local_eval:
-                    public_paths.add("/eval/invoke")
                 if request.path in public_paths:
                     return await handler(request)
                 return await jwt_authorization_middleware(request, handler)
@@ -277,9 +289,10 @@ class LangchainOaHost:
 
         @web_middleware
         async def anonymous_claims(request: Request, handler):
-            if not auth_configuration or request.path == "/api/health" or (
-                settings.enable_local_eval and request.path == "/eval/invoke"
-            ):
+            public_paths = {"/api/health"}
+            if settings.enable_local_eval:
+                public_paths.add("/eval/invoke")
+            if request.path in public_paths:
                 request["claims_identity"] = ClaimsIdentity(
                     {
                         AuthenticationConstants.AUDIENCE_CLAIM: "anonymous",
@@ -288,6 +301,9 @@ class LangchainOaHost:
                     False,
                     "Anonymous",
                 )
+                return await handler(request)
+            if not auth_configuration:
+                return json_response({"error": "authentication not configured"}, status=503)
             return await handler(request)
 
         middlewares.append(anonymous_claims)

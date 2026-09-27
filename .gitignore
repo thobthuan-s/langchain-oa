@@ -17,6 +17,8 @@ __pycache__/
 # Build output
 manifest/
 *.zip
+defender.exe
+*.sarif
 
 # macOS
 .DS_Store

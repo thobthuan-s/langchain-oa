@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -132,6 +133,12 @@ async def get_resource(resource_id: str) -> dict[str, Any]:
 async def query_logs(workspace_id: str, query: str, timespan_hours: int = 24) -> dict[str, Any]:
     """Run a bounded read-only KQL query against an Azure Log Analytics workspace."""
 
+    allowlist = {
+        entry.strip() for entry in settings.azure_log_workspace_allowlist.split(",") if entry.strip()
+    }
+    if allowlist and workspace_id not in allowlist:
+        return {"status": "error", "error": "workspace_id is not in the configured allowlist"}
+
     cleaned_query = query.strip()
     if not cleaned_query or len(cleaned_query) > 4000:
         return {"status": "error", "error": "query must contain 1 to 4000 characters"}
@@ -198,7 +205,7 @@ async def query_metrics(
         )
         results: dict[str, Any] = {}
         for metric in response.metrics:
-            points: list[dict[str, Any]] = []
+            points: deque[dict[str, Any]] = deque(maxlen=20)
             for series in metric.timeseries:
                 for point in series.data:
                     value = getattr(point, aggregation.lower(), None)
@@ -209,7 +216,7 @@ async def query_metrics(
                                 "value": value,
                             }
                         )
-            results[metric.name] = {"unit": str(metric.unit), "data_points": points[-20:]}
+            results[metric.name] = {"unit": str(metric.unit), "data_points": list(points)}
         return {"status": "success", "metrics": results}
 
     try:

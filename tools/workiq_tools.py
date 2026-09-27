@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from langchain.tools import tool
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _MANIFEST_PATH = Path(__file__).resolve().parent.parent / "ToolingManifest.json"
 _GATEWAY_ROOT = "https://agent365.svc.cloud.microsoft/agents/servers"
+_ALLOWED_MCP_HOST = urlparse(_GATEWAY_ROOT).netloc
 
 # Fallback catalog. ToolingManifest.json, written by `a365 develop add-mcp-servers`,
 # overrides these names and URLs when present.
@@ -248,6 +250,8 @@ async def _list_tools(server: str) -> list[dict[str, Any]]:
 
 
 async def _call_tool(server: str, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if not is_read_only_workiq_tool(tool_name):
+        raise WorkIqError("The requested Work IQ operation is not allowed by the read-only policy.")
     config = _get_server(server)
     _ensure_authenticated(server)
     client = _McpClient(config["url"], server)
@@ -265,7 +269,11 @@ def _get_server(server: str) -> dict[str, str]:
     key = server.strip().lower()
     if key not in _SERVER_CONFIG:
         raise WorkIqError("server must be one of: sharepoint, mail, calendar")
-    return _SERVER_CONFIG[key]
+    config = _SERVER_CONFIG[key]
+    parsed = urlparse(config["url"])
+    if parsed.scheme != "https" or parsed.netloc != _ALLOWED_MCP_HOST:
+        raise WorkIqError(f"Work IQ server '{server}' has an untrusted or unpinned MCP endpoint")
+    return config
 
 
 def _ensure_authenticated(server: str) -> None:
@@ -474,24 +482,50 @@ def _iter_strings(value: Any):
 
 
 def _decode_docx_payload(value: str) -> bytes | None:
+    max_encoded_chars = 8 * 1024 * 1024
+    max_payload_bytes = 6 * 1024 * 1024
+
     text = value.strip()
+    if len(text) > max_encoded_chars:
+        return None
     if text.startswith("data:") and "," in text:
         text = text.split(",", 1)[1].strip()
+        if len(text) > max_encoded_chars:
+            return None
     if text.startswith("PK\x03\x04"):
-        return text.encode("latin-1", errors="ignore")
+        payload = text.encode("latin-1", errors="ignore")
+        return payload if len(payload) <= max_payload_bytes else None
     compact = "".join(text.split())
+    if len(compact) > max_encoded_chars:
+        return None
     if not compact.startswith("UEsDB"):
         return None
     try:
-        return base64.b64decode(compact, validate=False)
+        payload = base64.b64decode(compact, validate=True)
     except (binascii.Error, ValueError):
         return None
+    return payload if len(payload) <= max_payload_bytes else None
 
 
 def _extract_docx_text(payload: bytes) -> str | None:
+    max_payload_bytes = 6 * 1024 * 1024
+    max_xml_bytes = 1_000_000
+    max_zip_ratio = 100
+    max_text_chars = 6000
+
+    if len(payload) > max_payload_bytes:
+        return None
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-            xml_bytes = archive.read("word/document.xml")
+            info = archive.getinfo("word/document.xml")
+            if info.file_size > max_xml_bytes or info.compress_size > max_xml_bytes:
+                return None
+            if info.compress_size and info.file_size > info.compress_size * max_zip_ratio:
+                return None
+            with archive.open(info) as xml_file:
+                xml_bytes = xml_file.read(max_xml_bytes + 1)
+            if len(xml_bytes) > max_xml_bytes:
+                return None
     except (zipfile.BadZipFile, KeyError, OSError):
         return None
 
@@ -502,10 +536,20 @@ def _extract_docx_text(payload: bytes) -> str | None:
         return None
 
     paragraphs: list[str] = []
+    total_chars = 0
     for paragraph in root.iter(f"{namespace}p"):
-        text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t"))
-        if text.strip():
-            paragraphs.append(text.strip())
+        text = "".join(node.text or "" for node in paragraph.iter(f"{namespace}t")).strip()
+        if not text:
+            continue
+        separator = 1 if paragraphs else 0
+        remaining = max_text_chars - total_chars - separator
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            paragraphs.append(text[:remaining])
+            break
+        paragraphs.append(text)
+        total_chars += len(text) + separator
     return "\n".join(paragraphs) or None
 
 

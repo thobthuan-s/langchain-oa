@@ -17,6 +17,7 @@ from tools.workiq_tools import reset_workiq_context, set_workiq_context
 logger = logging.getLogger(__name__)
 PROMPT_PATH = Path(__file__).parent / "agent-prompt.txt"
 MAX_HISTORY_MESSAGES = 16
+MAX_HISTORY_CONVERSATIONS = 1024
 
 _agent: Any = None
 _prompt_mtime = -1.0
@@ -48,7 +49,10 @@ async def run_agent(
     messages = result.get("messages", []) if isinstance(result, dict) else []
     if messages:
         async with _history_lock:
+            _histories.pop(conversation_id, None)
             _histories[conversation_id] = messages[-MAX_HISTORY_MESSAGES:]
+            while len(_histories) > MAX_HISTORY_CONVERSATIONS:
+                _histories.pop(next(iter(_histories)))
     return _last_text(messages) or "I completed the request but did not receive a text response."
 
 
