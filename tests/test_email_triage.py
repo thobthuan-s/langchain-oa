@@ -585,6 +585,7 @@ def test_verified_customer_research_uses_bound_tools_and_routes_to_owner(monkeyp
         return email_triage.ResearchedReply(
             reply_text="Your Microsoft 365 E5 term ends on 2026-10-20.",
             sources=["Subscription Microsoft 365 E5 (250 seats, term ends 2026-10-20)"],
+            unresolved=["Whether to renew the same quantity"],
         )
 
     monkeypatch.setattr(email_triage, "classify_email", fake_classify)
@@ -798,3 +799,55 @@ def test_email_route_caches_the_observability_token_before_triage(monkeypatch) -
     asyncio.run(route.handler(context, None))
 
     assert calls == ["cache-token", "triage"]
+
+
+def test_escalation_falls_back_to_draft_then_send(monkeypatch) -> None:
+    from tools.workiq_tools import MailToolNotFound
+
+    adapter, calls = _FakeAdapter(), []
+    controller = _controller(adapter, calls, monkeypatch)
+
+    async def fake_run(_context, operation, build_arguments):
+        tool = {"name": f"mcp_MailTools_graph_mail_{operation}", "inputSchema": {"properties": {}}}
+        calls.append((operation, build_arguments(tool)))
+        if operation == "send":
+            raise MailToolNotFound("no send tool")
+        if operation == "draft":
+            draft = '{"id": "AAMkAGDraftMessageId0000000001", "subject": "x"}'
+            return {"tool": "createMessage", "result": {"content": [{"type": "text", "text": draft}]}}
+        return {"tool": operation, "result": {}}
+
+    monkeypatch.setattr(controller, "_run_mail_operation", fake_run)
+    proposal = PendingProposal(
+        code="ABC234", email_id="e", email_reference={}, escalation_target="owner@partner-test.com",
+        decision=_decision(escalate=True, escalation_reason="Needs owner."),
+    )
+
+    result = asyncio.run(controller._escalate(_FakeContext(_email_activity()), proposal))
+
+    assert result == "Escalated to owner@partner-test.com."
+    assert [operation for operation, _ in calls] == ["send", "draft", "send_draft"]
+    assert calls[-1][1] == {"id": "AAMkAGDraftMessageId0000000001"}
+
+
+def test_mail_resolution_accepts_alternate_send_names() -> None:
+    from tools import workiq_tools as wt
+
+    assert wt.resolve_mail_operation("send", [{"name": "mcp_MailTools_graph_mail_sendEmail"}])["name"].endswith("sendEmail")
+    assert wt.resolve_mail_operation("draft", [{"name": "mcp_MailTools_graph_mail_createMessage"}]) is not None
+    assert wt.resolve_mail_operation("send", [{"name": "mcp_MailTools_graph_mail_sendDraft"}]) is None
+
+
+def test_answered_customer_question_drops_the_classifier_escalation() -> None:
+    from types import SimpleNamespace
+
+    verified = SimpleNamespace(verified=True)
+    answered = email_triage.ResearchedReply(reply_text="Your term ends on 20 October 2026.")
+    open_items = email_triage.ResearchedReply(reply_text="...", unresolved=["Exact price"])
+    decision = _decision(escalate=True, escalation_reason="Needs admin access.")
+
+    assert email_triage.settle_escalation_after_research(decision, answered, verified).escalate is False
+    assert email_triage.settle_escalation_after_research(decision, open_items, verified).escalate is True
+    commercial = _decision(escalate=True, risk_flags=["commercial_commitment"])
+    assert email_triage.settle_escalation_after_research(commercial, answered, verified).escalate is True
+    assert email_triage.settle_escalation_after_research(decision, answered, SimpleNamespace(verified=False)).escalate is True

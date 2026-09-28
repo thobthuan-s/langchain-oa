@@ -49,6 +49,11 @@ exception. Classify such email as action_required, set needs_reply to true with
 a short acknowledgement that the account team will follow up, and set escalate
 to true. Do not use payment_request for it.
 
+Questions about renewal dates, seat counts, subscription or invoice status, or
+case progress are ordinary account questions: do not flag them
+commercial_commitment and do not escalate them just because the answer is in
+account records.
+
 Use payment_request only when the sender asks the recipient to pay, transfer
 money, buy gift cards, or change bank or payment details. That is a fraud
 signal, not a customer billing question.

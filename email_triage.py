@@ -256,6 +256,25 @@ def apply_policy(decision: TriageDecision, external: bool) -> TriageDecision:
     )
 
 
+def settle_escalation_after_research(decision: TriageDecision, research: Any, customer: Any) -> TriageDecision:
+    """Drop an escalation the classifier raised only because it could not see the records.
+
+    Kept when the email is an escalation, asks for a commercial commitment, looks
+    injected, or the research left questions unanswered.
+    """
+
+    keep = (
+        customer is None
+        or not customer.verified
+        or research.unresolved
+        or decision.category == TriageCategory.ESCALATION
+        or {"commercial_commitment", "prompt_injection"} & set(decision.risk_flags)
+    )
+    if keep or not decision.escalate:
+        return decision
+    return decision.model_copy(update={"escalate": False, "escalation_reason": ""})
+
+
 def apply_customer_policy(decision: TriageDecision, customer: Any, customer_mode: bool) -> TriageDecision:
     """A known customer domain with an unlisted sender gets no reply and goes to the account owner."""
 
@@ -589,8 +608,11 @@ async def research_reply(
                 name="LangchainOA-triage-research",
             )
         agent = _researcher
+    from datetime import datetime, timezone
+
     customer_line = f"Customer: {customer.describe()}\n" if customer is not None else ""
     content = (
+        f"Today's date (UTC): {datetime.now(timezone.utc).date().isoformat()}\n"
         f"{customer_line}Triage summary: {decision.summary}\n"
         f"Initial draft (not yet verified):\n{decision.reply_text}\n\n"
         f"Sender: {sender_name} <{sender_address}>\n\n"
@@ -703,6 +725,7 @@ class EmailTriageController:
                 )
                 if research:
                     decision = decision.model_copy(update={"reply_text": research.reply_text.strip()[:_MAX_REPLY_CHARS]})
+                    decision = settle_escalation_after_research(decision, research, customer)
                 if decision.reply_text and should_enforce_block(
                     await capture_purview_response(purview_turn, decision.reply_text)
                 ):
@@ -973,7 +996,17 @@ class EmailTriageController:
                     payload[field_name] = message[field_name]
             return payload
 
-        await self._run_mail_operation(context, "send", arguments)
+        from tools.workiq_tools import MailToolNotFound
+
+        try:
+            await self._run_mail_operation(context, "send", arguments)
+        except MailToolNotFound:
+            # Some Mail catalogs only expose draft-then-send.
+            draft = await self._run_mail_operation(context, "draft", arguments)
+            draft_id = extract_message_id(draft.get("result"))
+            if not draft_id:
+                raise RuntimeError("The escalation draft was created but its message id was not returned")
+            await self._run_mail_operation(context, "send_draft", lambda _tool: {"id": draft_id})
         return f"Escalated to {target}."
 
     # Shared -----------------------------------------------------------------------
@@ -1033,6 +1066,32 @@ class EmailTriageController:
                 continue
             await context.send_activity(render_proposal(proposal))
             await self.store.mark_delivered(proposal.code)
+
+
+def extract_message_id(value: Any) -> str:
+    """Find a Graph message id in an MCP tool result, including JSON text content."""
+
+    import json
+
+    if isinstance(value, dict):
+        candidate = value.get("id")
+        if isinstance(candidate, str) and len(candidate) > 20:
+            return candidate
+        for item in value.values():
+            found = extract_message_id(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = extract_message_id(item)
+            if found:
+                return found
+    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            return extract_message_id(json.loads(value))
+        except ValueError:
+            return ""
+    return ""
 
 
 def _account_value(source: Any, *names: str) -> str:

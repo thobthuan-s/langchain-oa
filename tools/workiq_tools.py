@@ -584,11 +584,19 @@ def _extract_docx_text(payload: bytes) -> str | None:
 
 # Fixed mail write operations used by the email-triage executor after human approval.
 # They are never registered as LangChain tools, so the model cannot invoke them.
-_MAIL_OPERATION_SUFFIXES = {
-    "tag": "updatemessage",
-    "reply": "reply",
-    "send": "sendmail",
+# Candidate name suffixes per operation, in preference order. Catalog names vary
+# between Mail server versions, so each operation accepts several spellings.
+_MAIL_OPERATION_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "tag": ("updatemessage",),
+    "reply": ("reply",),
+    "send": ("sendmail", "sendemail", "sendmailmessage"),
+    "draft": ("createmessage", "createdraft", "createdraftmessage"),
+    "send_draft": ("senddraft", "senddraftmessage"),
 }
+
+
+class MailToolNotFound(WorkIqError):
+    """No discovered Mail MCP tool matches a fixed operation."""
 
 
 def _normalized_tool_name(name: str) -> str:
@@ -598,15 +606,18 @@ def _normalized_tool_name(name: str) -> str:
 def resolve_mail_operation(operation: str, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Pick the discovered Mail MCP tool for a fixed operation by exact name suffix."""
 
-    suffix = _MAIL_OPERATION_SUFFIXES.get(operation)
-    if not suffix:
+    suffixes = _MAIL_OPERATION_SUFFIXES.get(operation)
+    if not suffixes:
         raise WorkIqError(f"Unsupported mail operation: {operation}")
-    matches = [
-        candidate
-        for candidate in tools
-        if _normalized_tool_name(str(candidate.get("name") or "")).endswith(suffix)
-    ]
-    return min(matches, key=lambda item: len(str(item.get("name") or ""))) if matches else None
+    for suffix in suffixes:
+        matches = [
+            candidate
+            for candidate in tools
+            if _normalized_tool_name(str(candidate.get("name") or "")).endswith(suffix)
+        ]
+        if matches:
+            return min(matches, key=lambda item: len(str(item.get("name") or "")))
+    return None
 
 
 def tool_input_properties(tool_definition: dict[str, Any]) -> dict[str, Any]:
@@ -628,7 +639,9 @@ async def invoke_mail_operation(
     tools = await _list_tools("mail")
     tool_definition = resolve_mail_operation(operation, tools)
     if not tool_definition:
-        raise WorkIqError(f"No Mail MCP tool was discovered for operation '{operation}'")
+        names = sorted(str(item.get("name") or "") for item in tools)
+        logger.warning("No Mail MCP tool for operation %s; available tools: %s", operation, names)
+        raise MailToolNotFound(f"No Mail MCP tool was discovered for operation '{operation}'")
     tool_name = str(tool_definition["name"])
     result = await _call_tool("mail", tool_name, build_arguments(tool_definition))
     if isinstance(result, dict) and result.get("isError"):
