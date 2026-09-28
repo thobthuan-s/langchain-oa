@@ -28,6 +28,8 @@ try:
         ServiceEndpoint,
         UserDetails,
     )
+    from microsoft.opentelemetry.a365.core.span_details import SpanDetails
+    from opentelemetry import trace as otel_trace
     _AVAILABLE = True
 except Exception as import_error:  # pragma: no cover - optional dependency
     BaggageBuilder = None  # type: ignore[assignment,misc]
@@ -190,6 +192,23 @@ def invoke_agent_details(
     }
 
 
+def root_span_details() -> Any:
+    """Make ``invoke_agent`` a trace root, linked to the SDK span that is active now.
+
+    Agents SDK 1.x opens ``agents.app.run`` and ``agents.app.route_handler`` spans
+    around every handler. The Agent 365 exporter drops them because they carry no
+    gen_ai operation, so an ``invoke_agent`` parented to them points at a span that
+    never arrives and the run has no root. A link keeps the correlation.
+    """
+
+    current = otel_trace.get_current_span().get_span_context()
+    return SpanDetails(
+        # An empty Context is falsy and would fall back to the active span.
+        parent_context=otel_trace.set_span_in_context(otel_trace.INVALID_SPAN),
+        span_links=[otel_trace.Link(current)] if current.is_valid else None,
+    )
+
+
 def _start_invoke_agent(
     turn_context: Any,
     conversation_id: str,
@@ -202,7 +221,8 @@ def _start_invoke_agent(
         return None
     try:
         return InvokeAgentScope.start(
-            **invoke_agent_details(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id)
+            **invoke_agent_details(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id),
+            span_details=root_span_details(),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("invoke_agent span unavailable: %s", exc)

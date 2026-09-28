@@ -152,3 +152,35 @@ def test_observability_context_is_a_no_op_when_not_configured(monkeypatch) -> No
 
     with observability.observability_context(_teams_turn(), "conv-1", "hi") as telemetry:
         telemetry.record_response("ignored")
+
+
+def test_invoke_agent_is_a_trace_root_even_inside_an_sdk_span(monkeypatch) -> None:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    from microsoft.opentelemetry.a365.core.opentelemetry_scope import OpenTelemetryScope
+
+    tracer = provider.get_tracer("sdk")
+    monkeypatch.setattr(OpenTelemetryScope, "_tracer", provider.get_tracer("a365"))
+    monkeypatch.setattr(OpenTelemetryScope, "_is_telemetry_enabled", classmethod(lambda cls: True))
+
+    with tracer.start_as_current_span("agents.app.route_handler") as sdk_span:
+        scope = observability.InvokeAgentScope.start(
+            **observability.invoke_agent_details(_teams_turn(), "conv-1", None, "tenant-1", "agent-1", "bp-1"),
+            span_details=observability.root_span_details(),
+        )
+        with scope:
+            with tracer.start_as_current_span("chat child"):
+                pass
+
+    spans = {span.name: span for span in exporter.get_finished_spans()}
+    root = spans["invoke_agent LangchainOA"]
+    assert root.parent is None
+    assert root.links[0].context.span_id == sdk_span.get_span_context().span_id
+    assert spans["chat child"].parent.span_id == root.context.span_id
+    assert root.context.trace_id != sdk_span.get_span_context().trace_id
