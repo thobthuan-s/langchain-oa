@@ -122,6 +122,9 @@ class LangchainOaHost:
             @AgentNotification(self.agent_app).on_email(rank=RouteRank.FIRST, **handler_config)
             async def on_email(context: TurnContext, _state: TurnState, notification: Any) -> None:
                 try:
+                    # The exporter sends spans later from a background thread; it needs
+                    # this turn's delegated token cached or the upload is rejected.
+                    await self._cache_observability_token(context)
                     await self.email_triage.handle_email(context, notification)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Email triage failed: %s", exc, exc_info=True)
@@ -379,6 +382,8 @@ def run_host() -> None:
     # Azure SDK request logging prints every HTTP request and header at INFO.
     logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
     logging.getLogger("azure.identity").setLevel(logging.WARNING)
+    if settings.a365_exporter_log_level.strip():
+        logging.getLogger("microsoft.opentelemetry.a365").setLevel(settings.a365_exporter_log_level.strip().upper())
     configure_observability()
     LangchainOaHost().start()
 

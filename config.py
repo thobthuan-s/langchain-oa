@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     enable_a365_observability: bool = False
     enable_a365_observability_exporter: bool = False
     enable_a365_sensitive_data: bool = False
+    # Set to DEBUG to log each export attempt and its HTTP result.
+    a365_exporter_log_level: str = ""
     observability_tenant_id: str = Field(default="", validation_alias="AGENT365OBSERVABILITY__TENANTID")
     observability_blueprint_id: str = Field(
         default="",

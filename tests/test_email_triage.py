@@ -775,3 +775,26 @@ def test_card_ends_the_reply_quote_before_notes_and_escalation() -> None:
     assert "- *Note:* Some note." in after_quote
     assert "\n\n2. Escalate to" in after_quote
     assert all("Note" not in line and "Escalate" not in line for line in quote_lines)
+
+
+def test_email_route_caches_the_observability_token_before_triage(monkeypatch) -> None:
+    import host
+
+    monkeypatch.setattr(host.settings, "enable_email_triage", True)
+    app_host = host.LangchainOaHost()
+    calls: list[str] = []
+
+    async def fake_cache(_context):
+        calls.append("cache-token")
+
+    async def fake_handle_email(_context, _notification):
+        calls.append("triage")
+
+    monkeypatch.setattr(app_host, "_cache_observability_token", fake_cache)
+    monkeypatch.setattr(app_host.email_triage, "handle_email", fake_handle_email)
+    context = SimpleNamespace(activity=_email_activity())
+    route = next(route for route in app_host.agent_app._route_list if route.selector(context))
+
+    asyncio.run(route.handler(context, None))
+
+    assert calls == ["cache-token", "triage"]
