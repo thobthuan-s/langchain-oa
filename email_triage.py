@@ -34,6 +34,9 @@ RESEARCH_PROMPT_PATH = Path(__file__).parent / "triage-research-prompt.txt"
 CUSTOMER_PROMPT_PATH = Path(__file__).parent / "triage-customer-prompt.txt"
 _RESEARCH_CATEGORIES = frozenset({"question", "action_required", "meeting_request"})
 _RESEARCH_OK_FLAGS = frozenset({"external_sender", "commercial_commitment"})
+# A verified customer asking about their own account routinely looks "sensitive"
+# to the classifier; bound tools only expose that account's allowlisted columns.
+_CUSTOMER_RESEARCH_OK_FLAGS = _RESEARCH_OK_FLAGS | {"sensitive_data"}
 TAG_PREFIX = "Triage"
 PENDING_COMMAND = "/pending"
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -524,7 +527,12 @@ def should_research(
         return False, ""
     if decision.category.value not in _RESEARCH_CATEGORIES:
         return False, ""
-    if decision.risk_flags and set(decision.risk_flags) - _RESEARCH_OK_FLAGS:
+    allowed_flags = (
+        _CUSTOMER_RESEARCH_OK_FLAGS
+        if customer_mode and customer is not None and customer.verified
+        else _RESEARCH_OK_FLAGS
+    )
+    if decision.risk_flags and set(decision.risk_flags) - allowed_flags:
         return False, "Draft not researched because the email has risk flags."
     if customer_mode:
         if customer is None:

@@ -376,6 +376,9 @@ class LangchainOaHost:
 
 def run_host() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
+    # Azure SDK request logging prints every HTTP request and header at INFO.
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
+    logging.getLogger("azure.identity").setLevel(logging.WARNING)
     configure_observability()
     LangchainOaHost().start()
 

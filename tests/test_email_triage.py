@@ -738,3 +738,20 @@ def test_state_storage_defaults_to_memory_and_uses_blob_when_configured(monkeypa
     assert isinstance(storage, BlobStorage)
     assert storage.config.container_name == "agent-state"
     assert storage.config.credential is not None
+
+
+def test_sensitive_flag_blocks_research_only_outside_verified_customers(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research_external", True)
+    decision = _decision(risk_flags=["external_sender", "sensitive_data"])
+
+    verified, _ = email_triage.should_research(decision, True, SimpleNamespace(verified=True), True)
+    unverified, _ = email_triage.should_research(decision, True, SimpleNamespace(verified=False), True)
+    general, _ = email_triage.should_research(decision, True)
+    injected, _ = email_triage.should_research(
+        _decision(risk_flags=["sensitive_data", "prompt_injection"]), True, SimpleNamespace(verified=True), True
+    )
+
+    assert (verified, unverified, general, injected) == (True, False, False, False)
