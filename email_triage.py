@@ -329,13 +329,14 @@ def render_proposal(proposal: PendingProposal) -> str:
     lines.append("\n**Proposed actions**")
     step = 1
     if decision.needs_reply:
-        lines.append(f"{step}. Reply to the sender:\n\n> {_quote(decision.reply_text)}")
+        # A blank line must end the quote, or Markdown folds the next lines into it.
+        lines.append(f"{step}. Reply to the sender:\n\n> {_quote(decision.reply_text)}\n")
         if proposal.reply_sources:
-            lines.append("   Sources: " + "; ".join(proposal.reply_sources))
+            lines.append("- *Sources:* " + "; ".join(proposal.reply_sources))
         if proposal.reply_unresolved:
-            lines.append("   Not answered: " + "; ".join(proposal.reply_unresolved))
+            lines.append("- *Not answered:* " + "; ".join(proposal.reply_unresolved))
         if proposal.research_note:
-            lines.append(f"   Note: {proposal.research_note}")
+            lines.append(f"- *Note:* {proposal.research_note}")
         step += 1
     if decision.escalate:
         target = (
@@ -343,7 +344,7 @@ def render_proposal(proposal: PendingProposal) -> str:
             or settings.email_triage_escalation_address
             or "(no EMAIL_TRIAGE_ESCALATION_ADDRESS configured)"
         )
-        lines.append(f"{step}. Escalate to {target}: {decision.escalation_reason or 'human decision needed'}")
+        lines.append(f"\n{step}. Escalate to {target}: {decision.escalation_reason or 'human decision needed'}")
     lines.append(
         f"\nAnswer `approve {proposal.code}`, `reject {proposal.code}`, "
         f"or `edit {proposal.code}: <your reply text>`."

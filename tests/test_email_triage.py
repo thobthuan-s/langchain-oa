@@ -469,8 +469,8 @@ def test_grounded_reply_replaces_draft_and_lists_sources(monkeypatch) -> None:
     assert proposal.decision.reply_text.startswith("The migration finished on Friday.")
     assert proposal.reply_sources == ["Migration plan.docx (SharePoint)"]
     card = adapter.proactive[-1][1][0]
-    assert "Sources: Migration plan.docx (SharePoint)" in card
-    assert "Not answered: Exact cut-over time" in card
+    assert "*Sources:* Migration plan.docx (SharePoint)" in card
+    assert "*Not answered:* Exact cut-over time" in card
 
 
 def test_research_failure_keeps_draft_with_a_warning(monkeypatch) -> None:
@@ -755,3 +755,23 @@ def test_sensitive_flag_blocks_research_only_outside_verified_customers(monkeypa
     )
 
     assert (verified, unverified, general, injected) == (True, False, False, False)
+
+
+def test_card_ends_the_reply_quote_before_notes_and_escalation() -> None:
+    proposal = PendingProposal(
+        code="ABC234",
+        email_id="e",
+        email_reference={},
+        decision=_decision(escalate=True, escalation_reason="Renewal decision."),
+        reply_sources=["Subscription Microsoft 365 E5"],
+        research_note="Some note.",
+    )
+
+    card = email_triage.render_proposal(proposal)
+    quote_lines = [line for line in card.splitlines() if line.startswith(">")]
+    after_quote = card.split(quote_lines[-1], 1)[1]
+
+    assert after_quote.startswith("\n\n- *Sources:* Subscription Microsoft 365 E5")
+    assert "- *Note:* Some note." in after_quote
+    assert "\n\n2. Escalate to" in after_quote
+    assert all("Note" not in line and "Escalate" not in line for line in quote_lines)
