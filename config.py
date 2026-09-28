@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     enable_a365_sensitive_data: bool = False
     # Set to DEBUG to log each export attempt and its HTTP result.
     a365_exporter_log_level: str = ""
+    # Make invoke_agent a child of the incoming W3C traceparent. Keep off until the
+    # upstream parent span is confirmed to reach Agent 365 (see observability.py).
+    a365_continue_incoming_trace: bool = False
     observability_tenant_id: str = Field(default="", validation_alias="AGENT365OBSERVABILITY__TENANTID")
     observability_blueprint_id: str = Field(
         default="",

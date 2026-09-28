@@ -409,6 +409,7 @@ class _McpClient:
             headers["x-ms-environment-id"] = _environment_id.get()
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
+        _inject_trace_context(headers)
 
         response = await self._client.post(self._url, headers=headers, json=payload)
         session_id = response.headers.get("mcp-session-id")
@@ -421,6 +422,16 @@ class _McpClient:
         if not response.text.strip():
             return {}
         return _decode_response(response, request_id)
+
+
+def _inject_trace_context(headers: dict[str, str]) -> None:
+    """Send the active W3C trace context so the MCP gateway can continue this trace."""
+
+    try:
+        from opentelemetry.propagate import inject
+    except ImportError:  # pragma: no cover - OpenTelemetry is a runtime dependency
+        return
+    inject(headers)
 
 
 def _decode_response(response: httpx.Response, request_id: int | None = None) -> dict[str, Any]:

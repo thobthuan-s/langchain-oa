@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Iterator
 
 from config import settings
@@ -29,6 +30,7 @@ try:
         UserDetails,
     )
     from microsoft.opentelemetry.a365.core.span_details import SpanDetails
+    from microsoft.opentelemetry.a365.core.utils import extract_context_from_headers
     from opentelemetry import trace as otel_trace
     _AVAILABLE = True
 except Exception as import_error:  # pragma: no cover - optional dependency
@@ -41,6 +43,81 @@ else:
     _IMPORT_ERROR = None
 
 _configured = False
+
+# Placeholder the attribute reference prescribes when the caller's IP is unknown;
+# Teams and email activities do not carry the end user's IP address.
+UNKNOWN_CLIENT_IP = "0.0.0.0"
+
+# W3C trace headers of the HTTP request currently being processed.
+_incoming_trace_headers: ContextVar[dict[str, str]] = ContextVar("langchainoa_incoming_trace", default={})
+
+
+def set_incoming_trace_headers(headers: Any) -> Any:
+    """Remember the request's ``traceparent``/``tracestate`` for this turn; returns a reset token."""
+
+    captured = {
+        name: str(headers.get(name))
+        for name in ("traceparent", "tracestate")
+        if headers is not None and headers.get(name)
+    }
+    return _incoming_trace_headers.set(captured)
+
+
+def reset_incoming_trace_headers(token: Any) -> None:
+    _incoming_trace_headers.reset(token)
+
+
+def incoming_trace_context() -> Any:
+    """Return the span context of the incoming ``traceparent``, or None when absent or invalid."""
+
+    headers = _incoming_trace_headers.get()
+    if not (_AVAILABLE and headers.get("traceparent")):
+        return None
+    span_context = otel_trace.get_current_span(extract_context_from_headers(headers)).get_span_context()
+    return span_context if span_context.is_valid else None
+
+
+def telemetry_conversation_id(turn_context: Any, fallback: str) -> str:
+    """Use the raw activity conversation ID, as the distro's ``populate_baggage`` helper does.
+
+    The Agent 365 gateway records the same raw value, so gateway and agent rows
+    share a conversation key in Defender advanced hunting.
+    """
+
+    conversation = getattr(getattr(turn_context, "activity", None), "conversation", None)
+    return _value(conversation, "id") or fallback
+
+
+def telemetry_channel(activity: Any) -> str:
+    """Map the activity channel to the canonical Agent 365 channel names (``msteams``, ``outlook``)."""
+
+    channel_id = getattr(activity, "channel_id", None) if activity is not None else None
+    channel = str(getattr(channel_id, "channel", None) or channel_id or "").lower()
+    sub_channel = str(getattr(channel_id, "sub_channel", None) or "").lower()
+    if not sub_channel and ":" in channel:
+        channel, sub_channel = channel.split(":", 1)
+    if channel == "agents" and sub_channel == "email":
+        return "outlook"
+    return channel or "msteams"
+
+
+def execution_type(activity: Any) -> str:
+    """``EventToAgent`` for platform notifications (for example email), else ``HumanToAgent``."""
+
+    channel_id = getattr(activity, "channel_id", None) if activity is not None else None
+    channel = str(getattr(channel_id, "channel", None) or channel_id or "").lower()
+    return "EventToAgent" if channel.startswith("agents") else "HumanToAgent"
+
+
+def caller_fields(sender: Any) -> dict[str, str | None]:
+    """``user.id`` must be an Entra object ID; external senders (email) only get ``user.email``."""
+
+    sender_id = _value(sender, "id")
+    return {
+        "user_id": _value(sender, "aad_object_id", "aadObjectId") or None,
+        "user_email": sender_id if "@" in sender_id else None,
+        "user_name": _value(sender, "name") or None,
+    }
 
 
 def configure_observability() -> None:
@@ -122,6 +199,8 @@ def observability_context(
     )
     blueprint_id = settings.observability_blueprint_id or settings.blueprint_app_id
     hostname, port = _server_parts(_value(activity, "service_url", "serviceUrl"))
+    conversation_id = telemetry_conversation_id(turn_context, conversation_id)
+    caller = caller_fields(sender)
 
     builder = (
         BaggageBuilder()
@@ -129,17 +208,20 @@ def observability_context(
         .tenant_id(tenant_id)
         .agent_id(agent_id)
         .agent_name("LangchainOA")
-        .agent_description("Read-only operations and knowledge AI Teammate")
+        .agent_description("Operations, knowledge, and email-triage AI Teammate")
         .agent_blueprint_id(blueprint_id)
         .agentic_user_id(_value(recipient, "agentic_user_id", "agenticUserId"))
         .agentic_user_email(_value(recipient, "agentic_user_upn", "agenticUserUpn"))
         .conversation_id(conversation_id)
         .session_id(conversation_id)
-        .channel_name(_value(activity, "channel_id", "channelId") or "msteams")
+        .channel_name(telemetry_channel(activity))
         .invoke_agent_server(hostname, port)
-        .user_id(_value(sender, "aad_object_id", "aadObjectId", "id"))
-        .user_name(_value(sender, "name"))
-        .set_pairs({"gen_ai.agent.type": "Agent365AiTeammate"})
+        .user_id(caller["user_id"])
+        .user_email(caller["user_email"])
+        .user_name(caller["user_name"])
+        .user_client_ip(UNKNOWN_CLIENT_IP)
+        # The builder omits port 443, but the attribute reference makes server.port mandatory.
+        .set_pairs({"server.port": str(port)})
     )
     with builder.build():
         scope = _start_invoke_agent(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id)
@@ -165,12 +247,13 @@ def invoke_agent_details(
     recipient = getattr(activity, "recipient", None)
     hostname, port = _server_parts(_value(activity, "service_url", "serviceUrl"))
     recipient_id = _value(recipient, "id")
+    caller = caller_fields(sender)
     return {
         "request": Request(
             content=[input_text] if input_text and settings.enable_a365_sensitive_data else None,
             session_id=conversation_id,
             conversation_id=conversation_id,
-            channel=Channel(name=_value(activity, "channel_id", "channelId") or "msteams"),
+            channel=Channel(name=telemetry_channel(activity)),
         ),
         "scope_details": InvokeAgentScopeDetails(endpoint=ServiceEndpoint(hostname=hostname, port=port)),
         "agent_details": AgentDetails(
@@ -185,28 +268,51 @@ def invoke_agent_details(
         ),
         "caller_details": CallerDetails(
             user_details=UserDetails(
-                user_id=_value(sender, "aad_object_id", "aadObjectId", "id") or None,
-                user_name=_value(sender, "name") or None,
+                user_id=caller["user_id"],
+                user_email=caller["user_email"],
+                user_name=caller["user_name"],
+                user_client_ip=UNKNOWN_CLIENT_IP,
             )
         ),
     }
 
 
 def root_span_details() -> Any:
-    """Make ``invoke_agent`` a trace root, linked to the SDK span that is active now.
+    """Choose the parent of the turn's ``invoke_agent`` span.
 
     Agents SDK 1.x opens ``agents.app.run`` and ``agents.app.route_handler`` spans
     around every handler. The Agent 365 exporter drops them because they carry no
-    gen_ai operation, so an ``invoke_agent`` parented to them points at a span that
-    never arrives and the run has no root. A link keeps the correlation.
+    gen_ai operation, so ``invoke_agent`` is never parented to them; a link keeps
+    that correlation instead.
+
+    When the request carries a W3C ``traceparent`` it is always linked, and with
+    A365_CONTINUE_INCOMING_TRACE the span becomes its child so the upstream trace
+    continues. That switch stays off until the upstream parent is confirmed to be
+    exported to Agent 365; otherwise the run would again point at a missing parent.
     """
 
+    links = []
     current = otel_trace.get_current_span().get_span_context()
-    return SpanDetails(
+    if current.is_valid:
+        links.append(otel_trace.Link(current))
+    incoming = incoming_trace_context()
+    if incoming is not None:
+        links.append(otel_trace.Link(incoming, {"link.source": "incoming_traceparent"}))
+        logger.info(
+            "Incoming traceparent: trace_id=%s parent_span_id=%s continue=%s",
+            format(incoming.trace_id, "032x"),
+            format(incoming.span_id, "016x"),
+            settings.a365_continue_incoming_trace,
+        )
+    else:
+        logger.info("Incoming traceparent: none")
+
+    if incoming is not None and settings.a365_continue_incoming_trace:
+        parent_context = otel_trace.set_span_in_context(otel_trace.NonRecordingSpan(incoming))
+    else:
         # An empty Context is falsy and would fall back to the active span.
-        parent_context=otel_trace.set_span_in_context(otel_trace.INVALID_SPAN),
-        span_links=[otel_trace.Link(current)] if current.is_valid else None,
-    )
+        parent_context = otel_trace.set_span_in_context(otel_trace.INVALID_SPAN)
+    return SpanDetails(parent_context=parent_context, span_links=links or None)
 
 
 def _start_invoke_agent(
@@ -220,13 +326,21 @@ def _start_invoke_agent(
     if not (InvokeAgentScope and tenant_id and agent_id):
         return None
     try:
-        return InvokeAgentScope.start(
+        scope = InvokeAgentScope.start(
             **invoke_agent_details(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id),
             span_details=root_span_details(),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("invoke_agent span unavailable: %s", exc)
         return None
+    activity = getattr(turn_context, "activity", None)
+    try:
+        _, port = _server_parts(_value(activity, "service_url", "serviceUrl"))
+        scope.set_tag_maybe("server.port", str(port))
+        scope.set_tag_maybe("gen_ai.execution.type", execution_type(activity))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invoke_agent optional attributes not set: %s", exc)
+    return scope
 
 
 def runtime_identity(turn_context: Any) -> tuple[str, str]:

@@ -291,7 +291,13 @@ class LangchainOaHost:
         )
 
         async def messages(request: Request) -> Response:
-            return await start_agent_process(request, request.app["agent_app"], request.app["adapter"])
+            from observability import reset_incoming_trace_headers, set_incoming_trace_headers
+
+            token = set_incoming_trace_headers(request.headers)
+            try:
+                return await start_agent_process(request, request.app["agent_app"], request.app["adapter"])
+            finally:
+                reset_incoming_trace_headers(token)
 
         async def health(_request: Request) -> Response:
             return json_response(
