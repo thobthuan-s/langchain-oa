@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, messages_from_dict, messages_to_dict
 
 from aoai_model import create_chat_model
 from tools import ALL_TOOLS
@@ -29,6 +29,33 @@ _history_lock = asyncio.Lock()
 # conversation_id -> (last_used, messages); ordered oldest to newest use.
 _histories: OrderedDict[str, tuple[float, list[BaseMessage]]] = OrderedDict()
 _conversation_locks: dict[str, asyncio.Lock] = {}
+# Optional Agents SDK Storage; the in-memory dict above acts as its cache.
+_history_storage: Any = None
+
+
+class _HistoryItem:
+    """StoreItem wrapper for persisted chat history."""
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        self.data = data
+
+    def store_item_to_json(self) -> dict[str, Any]:
+        return self.data
+
+    @staticmethod
+    def from_json_to_store_item(json_data: dict[str, Any]) -> "_HistoryItem":
+        return _HistoryItem(dict(json_data))
+
+
+def configure_history_storage(storage: Any) -> None:
+    """Persist chat history to an Agents SDK Storage, or pass None for memory only."""
+
+    global _history_storage
+    _history_storage = storage
+
+
+def _history_key(conversation_id: str) -> str:
+    return f"langchainoa-history-{conversation_id}"
 
 
 async def run_agent(
@@ -83,19 +110,55 @@ async def _load_history(conversation_id: str) -> list[BaseMessage]:
     async with _history_lock:
         _evict_expired(time.time())
         entry = _histories.get(conversation_id)
-        if not entry or time.time() - entry[0] > HISTORY_TTL_SECONDS:
-            return []
+        if entry and time.time() - entry[0] <= HISTORY_TTL_SECONDS:
+            _histories.move_to_end(conversation_id)
+            return list(entry[1])
+    stored = await _read_stored_history(conversation_id)
+    if not stored:
+        return []
+    async with _history_lock:
+        _histories[conversation_id] = stored
         _histories.move_to_end(conversation_id)
-        return list(entry[1])
+    return list(stored[1])
 
 
 async def _save_history(conversation_id: str, messages: list[BaseMessage]) -> None:
+    now = time.time()
     async with _history_lock:
-        _histories[conversation_id] = (time.time(), messages)
+        _histories[conversation_id] = (now, messages)
         _histories.move_to_end(conversation_id)
         while len(_histories) > MAX_CONVERSATIONS:
             oldest, _ = _histories.popitem(last=False)
             _drop_idle_lock(oldest)
+    await _write_stored_history(conversation_id, now, messages)
+
+
+async def _read_stored_history(conversation_id: str) -> tuple[float, list[BaseMessage]] | None:
+    if _history_storage is None:
+        return None
+    key = _history_key(conversation_id)
+    try:
+        item = (await _history_storage.read([key], target_cls=_HistoryItem)).get(key)
+        if not item:
+            return None
+        last_used = float(item.data.get("at", 0))
+        if time.time() - last_used > HISTORY_TTL_SECONDS:
+            return None
+        return last_used, trim_history(messages_from_dict(item.data.get("messages", [])))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Stored chat history unavailable: %s", exc)
+        return None
+
+
+async def _write_stored_history(conversation_id: str, now: float, messages: list[BaseMessage]) -> None:
+    if _history_storage is None:
+        return
+    try:
+        await _history_storage.write(
+            {_history_key(conversation_id): _HistoryItem({"at": now, "messages": messages_to_dict(messages)})}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not persist chat history: %s", exc)
 
 
 def _evict_expired(now: float) -> None:

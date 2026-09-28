@@ -19,6 +19,13 @@ REGISTRY_NAME="${REGISTRY_NAME:-acr${REGISTRY_STEM}${SUBSCRIPTION_SUFFIX}}"
 # does not have to match the container app region.
 ACR_LOCATION="${ACR_LOCATION:-$LOCATION}"
 
+# Durable agent state in Blob storage, accessed with the managed identity only.
+# Set ENABLE_STATE_STORAGE=false to keep state in memory.
+ENABLE_STATE_STORAGE="${ENABLE_STATE_STORAGE:-true}"
+STATE_STORAGE_ACCOUNT="${STATE_STORAGE_ACCOUNT:-st${REGISTRY_STEM}${SUBSCRIPTION_SUFFIX}}"
+STATE_STORAGE_ACCOUNT="$(printf '%s' "$STATE_STORAGE_ACCOUNT" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' | cut -c1-24)"
+STATE_STORAGE_CONTAINER="${STATE_STORAGE_CONTAINER:-agent-state}"
+
 AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-}"
 AZURE_OPENAI_ACCOUNT_ID="${AZURE_OPENAI_ACCOUNT_ID:-}"
@@ -81,6 +88,23 @@ if ! az_sub containerapp env show -g "$RESOURCE_GROUP" -n "$ENVIRONMENT_NAME" -o
     --logs-workspace-id "$WORKSPACE_ID" --logs-workspace-key "$WORKSPACE_KEY" -o none
 fi
 
+STATE_ENV=()
+if [[ "$ENABLE_STATE_STORAGE" == "true" ]]; then
+  echo "==> State storage account $STATE_STORAGE_ACCOUNT"
+  az_sub storage account show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" -o none 2>/dev/null ||
+    az_sub storage account create -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" -l "$LOCATION" \
+      --sku Standard_LRS --kind StorageV2 --https-only true --min-tls-version TLS1_2 \
+      --allow-blob-public-access false --allow-shared-key-access false -o none
+  az_sub storage container-rm show -g "$RESOURCE_GROUP" --storage-account "$STATE_STORAGE_ACCOUNT" \
+    -n "$STATE_STORAGE_CONTAINER" -o none 2>/dev/null ||
+    az_sub storage container-rm create -g "$RESOURCE_GROUP" --storage-account "$STATE_STORAGE_ACCOUNT" \
+      -n "$STATE_STORAGE_CONTAINER" --public-access off -o none
+  STATE_STORAGE_ID=$(az_sub storage account show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" --query id -o tsv)
+  STATE_BLOB_URL=$(az_sub storage account show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" \
+    --query primaryEndpoints.blob -o tsv)
+  STATE_ENV=("STATE_STORAGE_BLOB_URL=${STATE_BLOB_URL%/}" "STATE_STORAGE_CONTAINER=$STATE_STORAGE_CONTAINER")
+fi
+
 # A unique tag per build: updating an unchanged :latest tag does not create a new revision.
 TAG="$(date +%Y%m%d%H%M%S)"
 IMAGE="${REGISTRY_NAME}.azurecr.io/${AGENT_NAME}:${TAG}"
@@ -104,6 +128,7 @@ if az_sub containerapp show -g "$RESOURCE_GROUP" -n "$APP_NAME" -o none 2>/dev/n
       "ENABLE_PURVIEW=$ENABLE_PURVIEW" \
       "PURVIEW_ENFORCE_BLOCKS=$PURVIEW_ENFORCE_BLOCKS" \
       "${TRIAGE_ENV[@]}" \
+      ${STATE_ENV[@]+"${STATE_ENV[@]}"} \
       "LOG_LEVEL=INFO" \
     -o none
 else
@@ -125,6 +150,7 @@ else
       "ENABLE_PURVIEW=$ENABLE_PURVIEW" \
       "PURVIEW_ENFORCE_BLOCKS=$PURVIEW_ENFORCE_BLOCKS" \
       "${TRIAGE_ENV[@]}" \
+      ${STATE_ENV[@]+"${STATE_ENV[@]}"} \
       "LOG_LEVEL=INFO" \
     -o none
 fi
@@ -149,6 +175,9 @@ else
   echo "    SKIPPED: set AZURE_OPENAI_ACCOUNT_ID to grant model access automatically."
 fi
 ensure_role "Reader" "/subscriptions/$SUBSCRIPTION_ID"
+if [[ "$ENABLE_STATE_STORAGE" == "true" ]]; then
+  ensure_role "Storage Blob Data Contributor" "$STATE_STORAGE_ID"
+fi
 
 FQDN=$(az_sub containerapp show -g "$RESOURCE_GROUP" -n "$APP_NAME" --query properties.configuration.ingress.fqdn -o tsv)
 echo

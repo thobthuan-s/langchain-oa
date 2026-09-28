@@ -175,11 +175,21 @@ Setup:
    library by exact name), and redeploy. The agent reads it
    through Microsoft Graph with its own delegated token.
 
+### Durable state
+
+`infra/deploy-azure.sh` creates a Standard LRS storage account (shared keys
+disabled, no public access) and grants the container's managed identity
+**Storage Blob Data Contributor**. It then sets `STATE_STORAGE_BLOB_URL`. With
+that set, the SDK turn state, triage proposals, approver chats, the
+processed-email list, and chat history all survive restarts and redeploys, so
+approvers say "hi" once. Set `ENABLE_STATE_STORAGE=false` to keep state in memory.
+
 ### Limits
 
-- Proposals, dedupe state, and approver conversations use the host's
-  `MemoryStorage`. A restart drops pending proposals. Swap in a persistent
-  Agents SDK storage, such as Blob or Cosmos DB, before production use.
+- Without `STATE_STORAGE_BLOB_URL`, proposals, dedupe state, and approver
+  conversations live in memory and a restart drops them.
+- Locks that make approval codes single-use are per process, so keep one
+  replica until claims use Blob ETags.
 - Reply research uses the same read-only tools as chat. It runs only for
   `question`, `action_required`, and `meeting_request` email without risk
   flags, and skips external senders unless `EMAIL_TRIAGE_RESEARCH_EXTERNAL=true`,
@@ -678,7 +688,7 @@ read-only. Approval-gated mail actions are available through
 
 | Extension | How |
 |---|---|
-| Persistent triage state | Pass a Blob or Cosmos DB Agents SDK storage to the host instead of `MemoryStorage` |
+| Scale out | Claim approval codes with Blob ETag conditions, then raise `--max-replicas` |
 
 Conversation history is in-process. Move it to a shared store before running
 more than one replica.

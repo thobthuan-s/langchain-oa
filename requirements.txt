@@ -5,6 +5,8 @@ microsoft-agents-activity==1.7.0
 microsoft-agents-authentication-msal==1.7.0
 microsoft-agents-hosting-aiohttp==1.7.0
 microsoft-agents-hosting-core==1.7.0
+# Durable state (triage proposals, approver chats, SDK turn state, chat history)
+microsoft-agents-storage-blob==1.7.0
 
 # LangChain + Azure OpenAI
 langchain>=1.0.0,<2.0.0

@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     customer_workbook_url: str = ""
     customer_records_cache_seconds: int = 60
 
+    # --- Durable state (optional) ---
+    # Blob service URL, e.g. https://<account>.blob.core.windows.net. When set,
+    # SDK state, triage proposals, approver chats, and chat history survive
+    # restarts. Authenticates with the managed identity; no key is stored.
+    state_storage_blob_url: str = ""
+    state_storage_container: str = "agent-state"
+
     # --- Server ---
     python_environment: str = Field(default="", validation_alias="PYTHON_ENVIRONMENT")
     host: str = "0.0.0.0"

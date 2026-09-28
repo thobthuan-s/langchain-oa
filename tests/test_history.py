@@ -88,3 +88,56 @@ def test_history_is_bounded_and_expires(monkeypatch) -> None:
     assert kept == ["b", "c"]
     assert expired == []
     assert "a" not in langchain_agent._conversation_locks
+
+
+def test_history_survives_a_restart_through_storage(monkeypatch) -> None:
+    from microsoft_agents.hosting.core import MemoryStorage
+
+    storage = MemoryStorage()
+    _reset_state(monkeypatch, _fake_agent())
+    langchain_agent.configure_history_storage(storage)
+    try:
+        asyncio.run(langchain_agent.run_agent("before restart", "conv-r"))
+        # A restart loses the process cache but not the storage.
+        monkeypatch.setattr(langchain_agent, "_histories", langchain_agent.OrderedDict())
+        history = asyncio.run(langchain_agent._load_history("conv-r"))
+    finally:
+        langchain_agent.configure_history_storage(None)
+
+    assert [message.content for message in history] == ["before restart", "reply to before restart"]
+
+
+def test_tool_call_messages_round_trip_through_storage(monkeypatch) -> None:
+    from microsoft_agents.hosting.core import MemoryStorage
+
+    storage = MemoryStorage()
+    langchain_agent.configure_history_storage(storage)
+    monkeypatch.setattr(langchain_agent, "_histories", langchain_agent.OrderedDict())
+    try:
+        asyncio.run(langchain_agent._save_history("conv-t", _tool_turn(1)))
+        monkeypatch.setattr(langchain_agent, "_histories", langchain_agent.OrderedDict())
+        restored = asyncio.run(langchain_agent._load_history("conv-t"))
+    finally:
+        langchain_agent.configure_history_storage(None)
+
+    assert [message.type for message in restored] == ["human", "ai", "tool", "ai"]
+    assert restored[1].tool_calls[0]["id"] == "call-1"
+    assert restored[2].tool_call_id == "call-1"
+
+
+def test_storage_failure_does_not_break_the_turn(monkeypatch) -> None:
+    class _BrokenStorage:
+        async def read(self, *_args, **_kwargs):
+            raise RuntimeError("403")
+
+        async def write(self, *_args, **_kwargs):
+            raise RuntimeError("403")
+
+    _reset_state(monkeypatch, _fake_agent())
+    langchain_agent.configure_history_storage(_BrokenStorage())
+    try:
+        reply = asyncio.run(langchain_agent.run_agent("hello", "conv-b"))
+    finally:
+        langchain_agent.configure_history_storage(None)
+
+    assert reply == "reply to hello"

@@ -689,3 +689,52 @@ def test_outlook_first_contact_banner_is_removed() -> None:
     )
 
     assert email_triage.strip_safety_banners(text) == "Hi, when does our E5 renew?"
+
+
+def test_approver_and_proposal_survive_a_restart(monkeypatch) -> None:
+    storage = MemoryStorage()
+    adapter, mail_calls = _FakeAdapter(), []
+    first = _controller(adapter, mail_calls, monkeypatch)
+    first.store = TriageStore(storage)
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+
+    async def before_restart():
+        await first.handle_approver_message(_FakeContext(_teams_activity("hi")))
+
+    asyncio.run(before_restart())
+
+    # New process: fresh controller and adapter, same durable storage, no new "hi".
+    adapter_after = _FakeAdapter()
+    second = _controller(adapter_after, mail_calls, monkeypatch)
+    second.store = TriageStore(storage)
+
+    async def after_restart():
+        await second.handle_email(_FakeContext(_email_activity()), _notification(_email_activity()))
+        await second.handle_email(_FakeContext(_email_activity()), _notification(_email_activity()))
+        return await second.store.pending()
+
+    pending = asyncio.run(after_restart())
+
+    assert len(pending) == 1 and pending[0].delivered is True
+    continuation, sent = adapter_after.proactive[0]
+    assert continuation.conversation.id == "teams-chat-1"
+    assert "New email triaged" in sent[0]
+
+
+def test_state_storage_defaults_to_memory_and_uses_blob_when_configured(monkeypatch) -> None:
+    import host
+    from microsoft_agents.storage.blob import BlobStorage
+
+    monkeypatch.setattr(host.settings, "state_storage_blob_url", "")
+    assert isinstance(host.create_state_storage(), MemoryStorage)
+
+    monkeypatch.setattr(host.settings, "state_storage_blob_url", "https://example.blob.core.windows.net")
+    monkeypatch.setattr(host.settings, "state_storage_container", "agent-state")
+    storage = host.create_state_storage()
+    assert isinstance(storage, BlobStorage)
+    assert storage.config.container_name == "agent-state"
+    assert storage.config.credential is not None

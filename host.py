@@ -57,7 +57,7 @@ class LangchainOaHost:
         from tools.workiq_tools import workiq_server_scopes
 
         self.workiq_scopes = workiq_server_scopes()
-        self.storage = MemoryStorage()
+        self.storage = create_state_storage()
         self.auth_handler_name = settings.auth_handler_name.strip() or None
         self.connection_manager = _create_connection_manager()
         self.adapter = CloudAdapter(connection_manager=self.connection_manager)
@@ -86,6 +86,9 @@ class LangchainOaHost:
                 customer_records=records_from_settings(),
                 exchange_graph_token=self._exchange_graph_token,
             )
+        from langchain_agent import configure_history_storage
+
+        configure_history_storage(self.storage if settings.state_storage_blob_url.strip() else None)
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -296,6 +299,7 @@ class LangchainOaHost:
                     "read_only": not settings.enable_email_triage,
                     "email_triage": "approval" if settings.enable_email_triage else "disabled",
                     "customer_records": bool(settings.customer_workbook_url.strip()),
+                    "state_storage": "blob" if settings.state_storage_blob_url.strip() else "memory",
                     "workiq": settings.enable_workiq,
                     "observability": (
                         "export" if settings.enable_a365_observability_exporter
@@ -373,6 +377,26 @@ def run_host() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     configure_observability()
     LangchainOaHost().start()
+
+
+def create_state_storage() -> Any:
+    """Use Azure Blob storage with the managed identity when configured, else memory."""
+
+    url = settings.state_storage_blob_url.strip()
+    if not url:
+        logger.warning("STATE_STORAGE_BLOB_URL is not set; state is lost on restart")
+        return MemoryStorage()
+    from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
+    from microsoft_agents.storage.blob import BlobStorage, BlobStorageConfig
+
+    logger.info("Durable state in blob container %s", settings.state_storage_container)
+    return BlobStorage(
+        BlobStorageConfig(
+            container_name=settings.state_storage_container,
+            url=url,
+            credential=AsyncDefaultAzureCredential(),
+        )
+    )
 
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
