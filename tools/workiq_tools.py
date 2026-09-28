@@ -53,11 +53,23 @@ _DEFAULT_SERVERS: dict[str, dict[str, str]] = {
     },
 }
 
-_ALLOWED_PREFIXES = ("get", "list", "find", "read", "search", "query", "check", "browse")
-_BLOCKED_TERMS = (
-    "add", "cancel", "create", "delete", "forward", "grant", "invite", "move",
-    "remove", "rename", "reply", "send", "set", "share", "update", "upload", "write",
+# Read-only policy. Tool names are split into words (camelCase, snake_case, kebab),
+# server prefixes such as "mcp_MailTools_graph_mail_" are removed, and the first
+# word must be a read verb. No word anywhere in the name may be a write verb.
+_READ_VERBS = frozenset({"get", "list", "find", "read", "search", "query", "browse"})
+_WRITE_WORDS = frozenset(
+    {
+        "accept", "add", "append", "apply", "approve", "archive", "assign", "cancel",
+        "check", "checkin", "checkout", "clear", "copy", "create", "decline", "delete",
+        "dismiss", "edit", "flag", "forward", "grant", "import", "insert",
+        "invite", "lock", "mark", "modify", "move", "patch", "pin", "post", "publish",
+        "put", "reject", "remove", "rename", "reply", "replyall", "reset", "respond",
+        "restore", "revoke", "save", "send", "set", "share", "snooze", "submit",
+        "subscribe", "tag", "unlock", "unpin", "unsubscribe", "update", "upload",
+        "upsert", "write",
+    }
 )
+_SERVER_PREFIX_RE = re.compile(r"^(?:mcp_[A-Za-z0-9]+_)?(?:graph_[A-Za-z0-9]+_)?")
 
 _access_tokens: ContextVar[dict[str, str]] = ContextVar("langchainoa_workiq_tokens", default={})
 _tenant_id: ContextVar[str] = ContextVar("langchainoa_workiq_tenant", default="")
@@ -127,8 +139,10 @@ def set_workiq_context(
 ) -> tuple[Any, Any, Any, Any]:
     """Set request-scoped identity context read by the Work IQ tools."""
 
+    if not access_tokens and settings.python_environment.strip().lower() != "production":
+        access_tokens = _local_access_tokens()
     return (
-        _access_tokens.set(access_tokens or _local_access_tokens()),
+        _access_tokens.set(access_tokens or {}),
         _tenant_id.set(tenant_id or settings.tenant_id or ""),
         _consumer_id.set(consumer_id or settings.workiq_consumer_id),
         _environment_id.set(environment_id or settings.workiq_environment_id),
@@ -145,11 +159,33 @@ def reset_workiq_context(resets: tuple[Any, Any, Any, Any]) -> None:
     _environment_id.reset(environment_reset)
 
 
-def is_read_only_workiq_tool(tool_name: str) -> bool:
-    """Return whether a discovered MCP tool name passes the read-only policy."""
+def tool_name_words(tool_name: str) -> list[str]:
+    """Split a tool name into lowercase words after removing the server prefix."""
 
-    normalized = re.sub(r"[^a-z0-9]", "", tool_name.lower())
-    return normalized.startswith(_ALLOWED_PREFIXES) and not any(term in normalized for term in _BLOCKED_TERMS)
+    operation = _SERVER_PREFIX_RE.sub("", tool_name.strip()) or tool_name.strip()
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", operation)
+    spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", spaced)
+    return [word for word in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if word]
+
+
+def is_read_only_workiq_tool(tool_name: str, tool_definition: dict[str, Any] | None = None) -> bool:
+    """Return whether a discovered MCP tool passes the read-only policy.
+
+    The name policy is the primary gate. MCP annotations can only make it stricter,
+    and WORKIQ_ALLOWED_TOOLS, when set, restricts calls to an explicit list.
+    """
+
+    allowlist = {name.strip() for name in settings.workiq_allowed_tools.split(",") if name.strip()}
+    if allowlist and tool_name not in allowlist:
+        return False
+    words = tool_name_words(tool_name)
+    if not words or words[0] not in _READ_VERBS or _WRITE_WORDS.intersection(words):
+        return False
+    annotations = (tool_definition or {}).get("annotations")
+    if isinstance(annotations, dict):
+        if annotations.get("readOnlyHint") is False or annotations.get("destructiveHint") is True:
+            return False
+    return True
 
 
 @tool
@@ -158,7 +194,7 @@ async def list_workiq_tools(server: str) -> dict[str, Any]:
 
     try:
         tools = await _list_tools(server)
-        safe_tools = [item for item in tools if is_read_only_workiq_tool(str(item.get("name") or ""))]
+        safe_tools = [item for item in tools if is_read_only_workiq_tool(str(item.get("name") or ""), item)]
         return {
             "status": "success",
             "server": server,
@@ -186,12 +222,20 @@ async def call_readonly_workiq_tool(
         }
     try:
         discovered = await _list_tools(server)
-        if tool_name not in {str(item.get("name") or "") for item in discovered}:
+        definition = next((item for item in discovered if str(item.get("name") or "") == tool_name), None)
+        if definition is None:
             return {
                 "status": "error",
                 "server": server,
                 "tool": tool_name,
                 "error": "Tool name was not returned by the selected Work IQ server.",
+            }
+        if not is_read_only_workiq_tool(tool_name, definition):
+            return {
+                "status": "blocked",
+                "server": server,
+                "tool": tool_name,
+                "error": "The requested Work IQ operation is not allowed by the read-only policy.",
             }
         result = await _call_tool(server, tool_name, arguments or {})
         return {
@@ -210,7 +254,7 @@ async def search_sharepoint(query: str, top: int = 5) -> dict[str, Any]:
 
     try:
         tools = await _list_tools("sharepoint")
-        safe_tools = [item for item in tools if is_read_only_workiq_tool(str(item.get("name") or ""))]
+        safe_tools = [item for item in tools if is_read_only_workiq_tool(str(item.get("name") or ""), item)]
         search_tool = _select_search_tool(safe_tools)
         if not search_tool:
             return {
@@ -340,6 +384,7 @@ class _McpClient:
         response = await self._post(
             {"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params},
             expect_response=True,
+            request_id=self._request_id,
         )
         if "error" in response:
             error = response["error"]
@@ -348,7 +393,12 @@ class _McpClient:
         result = response.get("result", {})
         return result if isinstance(result, dict) else {"value": result}
 
-    async def _post(self, payload: dict[str, Any], expect_response: bool) -> dict[str, Any]:
+    async def _post(
+        self,
+        payload: dict[str, Any],
+        expect_response: bool,
+        request_id: int | None = None,
+    ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {_access_tokens.get()[self._server]}",
             "Accept": "application/json, text/event-stream",
@@ -370,20 +420,39 @@ class _McpClient:
             raise WorkIqError(f"MCP HTTP {response.status_code}: {response.text[:500]}")
         if not response.text.strip():
             return {}
-        return _decode_response(response)
+        return _decode_response(response, request_id)
 
 
-def _decode_response(response: httpx.Response) -> dict[str, Any]:
+def _decode_response(response: httpx.Response, request_id: int | None = None) -> dict[str, Any]:
+    """Decode a JSON or SSE response, returning the message that answers ``request_id``."""
+
     text = response.text.strip()
     content_type = response.headers.get("content-type", "")
     if "text/event-stream" in content_type or text.startswith(("event:", "data:")):
-        for line in text.splitlines():
-            if line.startswith("data:"):
-                data = line.removeprefix("data:").strip()
-                if data and data != "[DONE]":
-                    return json.loads(data)
-        raise WorkIqError("MCP event stream did not contain JSON data")
+        for message in _sse_messages(text):
+            if request_id is None or message.get("id") == request_id:
+                return message
+        raise WorkIqError("MCP event stream did not contain a response for the request")
     return response.json()
+
+
+def _sse_messages(text: str):
+    """Yield JSON objects from SSE events, joining multi-line data fields."""
+
+    for block in re.split(r"\r?\n\r?\n", text):
+        data = "\n".join(
+            line.removeprefix("data:").removeprefix(" ")
+            for line in block.splitlines()
+            if line.startswith("data:")
+        ).strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            message = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(message, dict):
+            yield message
 
 
 def _select_search_tool(tools: list[dict[str, Any]]) -> dict[str, Any] | None:

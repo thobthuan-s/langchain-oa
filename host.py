@@ -250,6 +250,12 @@ class LangchainOaHost:
 
     def start(self) -> None:
         auth_configuration = self.create_auth_configuration()
+        bind_host = resolve_bind_host(
+            auth_configured=auth_configuration is not None,
+            enable_local_eval=settings.enable_local_eval,
+            host=settings.host,
+            environment=settings.python_environment,
+        )
 
         async def messages(request: Request) -> Response:
             return await start_agent_process(request, request.app["agent_app"], request.app["adapter"])
@@ -334,13 +340,40 @@ class LangchainOaHost:
         app["agent_configuration"] = auth_configuration
         app["agent_app"] = self.agent_app
         app["adapter"] = self.agent_app.adapter
-        run_app(app, host=settings.host, port=int(os.environ.get("PORT", settings.port)), handle_signals=True)
+        run_app(app, host=bind_host, port=int(os.environ.get("PORT", settings.port)), handle_signals=True)
 
 
 def run_host() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     configure_observability()
     LangchainOaHost().start()
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def resolve_bind_host(auth_configured: bool, enable_local_eval: bool, host: str, environment: str) -> str:
+    """Fail closed: never serve unauthenticated routes beyond the local machine.
+
+    In production, missing Activity Protocol credentials or an enabled local
+    evaluation route stop startup. Elsewhere those modes are bound to loopback.
+    """
+
+    production = environment.strip().lower() == "production"
+    if production and not auth_configured:
+        raise RuntimeError(
+            "Refusing to start in Production without Activity Protocol credentials; "
+            "run infra/sync-a365-settings.sh or set the CONNECTIONS__SERVICE_CONNECTION__* values"
+        )
+    if production and enable_local_eval:
+        raise RuntimeError("Refusing to start in Production with ENABLE_LOCAL_EVAL=true")
+    if (not auth_configured or enable_local_eval) and host not in _LOOPBACK_HOSTS:
+        logger.warning(
+            "Binding to 127.0.0.1 instead of %s because %s", host,
+            "local evaluation is enabled" if enable_local_eval else "requests are unauthenticated",
+        )
+        return "127.0.0.1"
+    return host
 
 
 def needs_client_secret(auth_type: str) -> bool:

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timedelta, timezone
+import threading
+from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 from azure.identity import DefaultAzureCredential
@@ -21,6 +23,8 @@ from config import settings
 _RESOURCE_TYPE_PATTERN = re.compile(r"^[A-Za-z0-9.]+(?:/[A-Za-z0-9._-]+)+$")
 _MAX_RESOURCES = 100
 _MAX_LOG_ROWS = 50
+_api_versions: dict[str, str] = {}
+_api_versions_lock = threading.Lock()
 
 
 def _subscription_id() -> str:
@@ -29,8 +33,82 @@ def _subscription_id() -> str:
     return settings.azure_subscription_id
 
 
+@lru_cache(maxsize=1)
+def _credential() -> DefaultAzureCredential:
+    """One shared credential so access tokens are cached across tool calls."""
+
+    return DefaultAzureCredential()
+
+
+@lru_cache(maxsize=4)
+def _resource_client_for(subscription_id: str) -> ResourceManagementClient:
+    return ResourceManagementClient(_credential(), subscription_id)
+
+
 def _resource_client() -> ResourceManagementClient:
-    return ResourceManagementClient(DefaultAzureCredential(), _subscription_id())
+    return _resource_client_for(_subscription_id())
+
+
+@lru_cache(maxsize=1)
+def _logs_client() -> LogsQueryClient:
+    return LogsQueryClient(_credential())
+
+
+@lru_cache(maxsize=1)
+def _metrics_client() -> MetricsQueryClient:
+    return MetricsQueryClient(_credential())
+
+
+def _check_subscription_scope(resource_id: str) -> None:
+    expected_prefix = f"/subscriptions/{_subscription_id()}/"
+    if not resource_id.lower().startswith(expected_prefix.lower()):
+        raise ValueError("resource_id must belong to the configured subscription")
+
+
+def parse_resource_type(resource_id: str) -> tuple[str, str]:
+    """Return (provider namespace, resource type) for an ARM resource ID."""
+
+    parts = [part for part in resource_id.split("/") if part]
+    lowered = [part.lower() for part in parts]
+    if "providers" not in lowered:
+        raise ValueError("resource_id does not contain a provider segment")
+    index = len(lowered) - 1 - lowered[::-1].index("providers")
+    remainder = parts[index + 1 :]
+    if len(remainder) < 3:
+        raise ValueError("resource_id is not a full resource ID")
+    return remainder[0], "/".join(remainder[1::2])
+
+
+def select_api_version(versions: list[str]) -> str | None:
+    """Prefer the newest stable API version, then the newest preview."""
+
+    stable = sorted((v for v in versions if "preview" not in v.lower()), reverse=True)
+    preview = sorted((v for v in versions if "preview" in v.lower()), reverse=True)
+    return (stable or preview or [None])[0]
+
+
+def _api_version_for(client: ResourceManagementClient, resource_id: str) -> str:
+    namespace, resource_type = parse_resource_type(resource_id)
+    key = f"{namespace}/{resource_type}".lower()
+    with _api_versions_lock:
+        cached = _api_versions.get(key)
+    if cached:
+        return cached
+    provider = client.providers.get(namespace)
+    version = None
+    for candidate in provider.resource_types or []:
+        if str(candidate.resource_type or "").lower() == resource_type.lower():
+            version = select_api_version(list(candidate.api_versions or []))
+            break
+    if not version:
+        raise ValueError(f"No API version found for resource type {namespace}/{resource_type}")
+    with _api_versions_lock:
+        _api_versions[key] = version
+    return version
+
+
+def _json_value(value: Any) -> Any:
+    return value.isoformat() if isinstance(value, (datetime, date)) else value
 
 
 def _safe_error(exc: Exception) -> dict[str, str]:
@@ -104,12 +182,10 @@ async def list_resources(
 async def get_resource(resource_id: str) -> dict[str, Any]:
     """Read details for one Azure resource using its full resource ID."""
 
-    expected_prefix = f"/subscriptions/{_subscription_id()}/"
-    if not resource_id.lower().startswith(expected_prefix.lower()):
-        return {"status": "error", "error": "resource_id must belong to the configured subscription"}
-
     def _get() -> dict[str, Any]:
-        resource = _resource_client().resources.get_by_id(resource_id, api_version="2024-03-01")
+        _check_subscription_scope(resource_id)
+        client = _resource_client()
+        resource = client.resources.get_by_id(resource_id, api_version=_api_version_for(client, resource_id))
         return {
             "status": "success",
             "resource": {
@@ -141,7 +217,7 @@ async def query_logs(workspace_id: str, query: str, timespan_hours: int = 24) ->
 
     def _query() -> dict[str, Any]:
         end_time = datetime.now(timezone.utc)
-        response = LogsQueryClient(DefaultAzureCredential()).query_workspace(
+        response = _logs_client().query_workspace(
             workspace_id=workspace_id,
             query=cleaned_query,
             timespan=(end_time - timedelta(hours=bounded_hours), end_time),
@@ -151,9 +227,10 @@ async def query_logs(workspace_id: str, query: str, timespan_hours: int = 24) ->
 
         rows: list[dict[str, Any]] = []
         for table in response.tables:
-            columns = [column.name for column in table.columns]
+            # azure-monitor-query 1.x returns column names as strings.
+            columns = [str(getattr(column, "name", column)) for column in table.columns]
             for row in table.rows:
-                rows.append(dict(zip(columns, row)))
+                rows.append({name: _json_value(value) for name, value in zip(columns, row)})
                 if len(rows) >= _MAX_LOG_ROWS:
                     break
             if len(rows) >= _MAX_LOG_ROWS:
@@ -179,18 +256,15 @@ async def query_metrics(
     if aggregation not in allowed_aggregations:
         return {"status": "error", "error": f"aggregation must be one of {sorted(allowed_aggregations)}"}
 
-    expected_prefix = f"/subscriptions/{_subscription_id()}/"
-    if not resource_id.lower().startswith(expected_prefix.lower()):
-        return {"status": "error", "error": "resource_id must belong to the configured subscription"}
-
     names = [name.strip() for name in metric_names.split(",") if name.strip()][:10]
     if not names:
         return {"status": "error", "error": "at least one metric name is required"}
     bounded_hours = max(1, min(timespan_hours, 168))
 
     def _query() -> dict[str, Any]:
+        _check_subscription_scope(resource_id)
         end_time = datetime.now(timezone.utc)
-        response = MetricsQueryClient(DefaultAzureCredential()).query_resource(
+        response = _metrics_client().query_resource(
             resource_uri=resource_id,
             metric_names=names,
             timespan=(end_time - timedelta(hours=bounded_hours), end_time),

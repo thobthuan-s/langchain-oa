@@ -110,7 +110,9 @@ async def _process_text(
     try:
         etag, modes = await _get_scope(turn)
         execution_mode = modes.get(activity, "")
-        payload = _content_payload(turn, content, activity, sequence_number, name)
+        payload = _content_payload(
+            turn, content, activity, sequence_number, name, truncated=len(text) > len(content)
+        )
         # No applicable protection scope is the only case that uses contentActivities.
         if not execution_mode:
             response = await _post_graph(
@@ -147,7 +149,7 @@ async def _process_text(
                 error="" if ok else _safe_http_error(response),
             )
             if body.get("protectionScopeState") == "modified":
-                _scope_cache.pop(turn.user_id or "unknown", None)
+                _scope_cache.pop(_scope_cache_key(turn), None)
         logger.info(
             "Purview operation=%s activity=%s status=%s available=%s blocked=%s mode=%s",
             decision.operation,
@@ -167,8 +169,12 @@ async def _process_text(
         )
 
 
+def _scope_cache_key(turn: PurviewTurn) -> str:
+    return f"{turn.user_id or 'unknown'}:{turn.agent_id}"
+
+
 async def _get_scope(turn: PurviewTurn) -> tuple[str | None, dict[str, str]]:
-    cache_key = f"{turn.user_id or 'unknown'}:{turn.agent_id}"
+    cache_key = _scope_cache_key(turn)
     cached = _scope_cache.get(cache_key)
     if cached and time.time() < cached[0]:
         return cached[1], cached[2]
@@ -239,6 +245,7 @@ def _content_payload(
     activity: str,
     sequence_number: int,
     name: str,
+    truncated: bool = False,
 ) -> dict[str, Any]:
     timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     blueprint_id = settings.observability_blueprint_id or settings.blueprint_app_id
@@ -268,7 +275,7 @@ def _content_payload(
                     "name": name,
                     "correlationId": turn.correlation_id,
                     "sequenceNumber": sequence_number,
-                    "isTruncated": len(text) >= settings.purview_max_content_chars,
+                    "isTruncated": truncated,
                     "createdDateTime": timestamp,
                     "modifiedDateTime": timestamp,
                 }

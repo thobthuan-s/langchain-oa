@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     workiq_tool_cache_seconds: int = 300
     workiq_request_timeout_seconds: float = 30.0
     workiq_max_search_results: int = 10
+    # Optional comma-separated exact tool names; when set, only these may be called.
+    workiq_allowed_tools: str = ""
 
     # --- Activity Protocol outbound replies (stamped by `a365 setup all`) ---
     service_connection_auth_type: str = Field(
@@ -91,6 +93,7 @@ class Settings(BaseSettings):
     email_triage_max_body_chars: int = 12000
 
     # --- Server ---
+    python_environment: str = Field(default="", validation_alias="PYTHON_ENVIRONMENT")
     host: str = "0.0.0.0"
     port: int = 8080
     log_level: str = "INFO"

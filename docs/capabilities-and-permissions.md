@@ -43,18 +43,21 @@ Three properties are deliberate:
 
 Work IQ tool catalogues change over time, so the agent discovers tools at
 runtime rather than hard-coding names. Discovered tools are filtered by a
-read-only policy before the model may call them:
+read-only policy before the model may call them. The name is split into words,
+server prefixes such as `mcp_MailTools_graph_mail_` are removed, and then:
 
-```python
-_ALLOWED_PREFIXES = ("get", "list", "find", "read", "search", "query",
-                     "check", "browse")
-_BLOCKED_TERMS    = ("add", "cancel", "create", "delete", "forward", "grant",
-                     "invite", "move", "remove", "rename", "reply", "send",
-                     "set", "share", "update", "upload", "write")
-```
+- the first word must be a read verb: `get`, `list`, `find`, `read`, `search`,
+  `query`, or `browse`;
+- no word may be a write verb, such as `send`, `reply`, `update`, `delete`,
+  `move`, `mark`, `flag`, `check`, or `set` (the full list is `_WRITE_WORDS` in
+  `tools/workiq_tools.py`);
+- a tool whose MCP annotations say `readOnlyHint: false` or
+  `destructiveHint: true` is rejected;
+- when `WORKIQ_ALLOWED_TOOLS` is set, only those exact names are allowed.
 
 A tool such as `sendMail` is rejected by that filter even if the tenant exposes
-it and the model asks for it.
+it and the model asks for it. `getMailboxSettings` is allowed, because `settings`
+is not the word `set`.
 
 ### Email triage operations (opt-in)
 

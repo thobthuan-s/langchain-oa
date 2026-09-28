@@ -123,3 +123,49 @@ def test_block_is_only_enforced_when_configured() -> None:
         assert purview.should_enforce_block(blocked) is True
     finally:
         purview.settings.purview_enforce_blocks = False
+
+
+def test_modified_scope_state_invalidates_the_cached_scope(monkeypatch) -> None:
+    compute_calls: list[str] = []
+
+    async def fake_post(url, token, payload, client_request_id, **_kwargs):
+        if url.endswith("/protectionScopes/compute"):
+            compute_calls.append(url)
+            return httpx.Response(
+                200,
+                json={"value": [{"activities": "uploadText", "executionMode": "evaluateInline"}]},
+            )
+        return httpx.Response(200, json={"protectionScopeState": "modified"})
+
+    monkeypatch.setattr(purview, "_post_graph", fake_post)
+
+    async def scenario():
+        await purview._process_text(_turn(), "one", "uploadText", 0, "Prompt")
+        await purview._process_text(_turn(), "two", "uploadText", 1, "Prompt")
+
+    asyncio.run(scenario())
+
+    assert len(compute_calls) == 2
+
+
+def test_is_truncated_only_when_text_was_cut(monkeypatch) -> None:
+    payloads: list[dict] = []
+    monkeypatch.setattr(purview.settings, "purview_max_content_chars", 5)
+
+    async def fake_post(url, token, payload, client_request_id, **_kwargs):
+        if url.endswith("/protectionScopes/compute"):
+            return httpx.Response(200, json={"value": []})
+        payloads.append(payload)
+        return httpx.Response(201, json={})
+
+    monkeypatch.setattr(purview, "_post_graph", fake_post)
+
+    async def scenario():
+        await purview._process_text(_turn(), "12345", "uploadText", 0, "Prompt")
+        await purview._process_text(_turn(), "123456", "uploadText", 1, "Prompt")
+
+    asyncio.run(scenario())
+
+    entries = [payload["contentToProcess"]["contentEntries"][0] for payload in payloads]
+    assert [entry["isTruncated"] for entry in entries] == [False, True]
+    assert entries[1]["content"]["data"] == "12345"
