@@ -60,3 +60,95 @@ def test_configure_observability_avoids_incompatible_openai_v2_wrapper(monkeypat
 
     assert captured["instrumentation_options"]["langchain"]["enabled"] is True
     assert captured["instrumentation_options"]["openai"]["enabled"] is False
+
+def _teams_turn():
+    return SimpleNamespace(
+        activity=SimpleNamespace(
+            channel_id="msteams",
+            service_url="https://smba.trafficmanager.net/emea/",
+            from_property=SimpleNamespace(aad_object_id="user-oid", name="Approver"),
+            recipient=SimpleNamespace(
+                id="agent@contoso.com",
+                tenant_id="tenant-1",
+                agentic_user_id="agentic-user-1",
+                agentic_app_id="agent-app",
+            ),
+            get_agentic_instance_id=lambda: "agent-instance",
+        )
+    )
+
+
+def test_invoke_agent_details_carry_identity_and_skip_content_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(observability.settings, "enable_a365_sensitive_data", False)
+
+    details = observability.invoke_agent_details(
+        _teams_turn(), "conv-1", "secret question", "tenant-1", "agent-instance", "blueprint-1"
+    )
+
+    agent = details["agent_details"]
+    assert (agent.agent_id, agent.tenant_id, agent.agent_blueprint_id) == ("agent-instance", "tenant-1", "blueprint-1")
+    assert agent.agentic_user_id == "agentic-user-1"
+    assert agent.agentic_user_email == "agent@contoso.com"
+    assert details["request"].conversation_id == "conv-1"
+    assert details["request"].channel.name == "msteams"
+    assert details["request"].content is None
+    assert details["caller_details"].user_details.user_id == "user-oid"
+    assert details["scope_details"].endpoint.hostname == "smba.trafficmanager.net"
+
+
+def test_invoke_agent_details_include_content_only_when_sensitive_data_enabled(monkeypatch) -> None:
+    monkeypatch.setattr(observability.settings, "enable_a365_sensitive_data", True)
+
+    details = observability.invoke_agent_details(_teams_turn(), "c", "question", "t", "a", "b")
+
+    assert details["request"].content == ["question"]
+
+
+def test_observability_context_wraps_the_turn_in_an_invoke_agent_scope(monkeypatch) -> None:
+    events = []
+
+    class _Scope:
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def __exit__(self, *exc):
+            events.append("exit")
+            return False
+
+        def record_response(self, text):
+            events.append(f"response:{text}")
+
+    class _Builder:
+        def __getattr__(self, _name):
+            return lambda *args, **kwargs: self
+
+        def build(self):
+            from contextlib import nullcontext
+
+            return nullcontext()
+
+    monkeypatch.setattr(observability, "_configured", True)
+    monkeypatch.setattr(observability, "BaggageBuilder", _Builder)
+    monkeypatch.setattr(observability.settings, "enable_a365_sensitive_data", True)
+    started = {}
+
+    def fake_start(**kwargs):
+        started.update(kwargs)
+        return _Scope()
+
+    monkeypatch.setattr(observability.InvokeAgentScope, "start", staticmethod(fake_start))
+
+    with observability.observability_context(_teams_turn(), "conv-1", "hi") as telemetry:
+        events.append("work")
+        telemetry.record_response("answer")
+
+    assert events == ["enter", "work", "response:answer", "exit"]
+    assert started["agent_details"].agent_id == "agent-instance"
+
+
+def test_observability_context_is_a_no_op_when_not_configured(monkeypatch) -> None:
+    monkeypatch.setattr(observability, "_configured", False)
+
+    with observability.observability_context(_teams_turn(), "conv-1", "hi") as telemetry:
+        telemetry.record_response("ignored")

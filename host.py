@@ -155,7 +155,7 @@ class LangchainOaHost:
                 return
 
             try:
-                with observability_context(context, conversation_id):
+                with observability_context(context, conversation_id, user_message) as telemetry:
                     response = await run_agent(
                         user_message=user_message,
                         conversation_id=conversation_id,
@@ -167,6 +167,7 @@ class LangchainOaHost:
                         ),
                         environment_id=settings.workiq_environment_id,
                     )
+                    telemetry.record_response(response)
                 if should_enforce_block(await capture_purview_response(purview_turn, response)):
                     response = settings.purview_blocked_response_message
                 await context.send_activity(response)

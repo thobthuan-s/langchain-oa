@@ -18,9 +18,20 @@ try:
         from microsoft.opentelemetry.a365.core import BaggageBuilder
     except ImportError:
         from microsoft.opentelemetry.a365.core.middleware.baggage_builder import BaggageBuilder
+    from microsoft.opentelemetry.a365.core import (
+        AgentDetails,
+        CallerDetails,
+        Channel,
+        InvokeAgentScope,
+        InvokeAgentScopeDetails,
+        Request,
+        ServiceEndpoint,
+        UserDetails,
+    )
     _AVAILABLE = True
 except Exception as import_error:  # pragma: no cover - optional dependency
     BaggageBuilder = None  # type: ignore[assignment,misc]
+    InvokeAgentScope = None  # type: ignore[assignment,misc]
     use_microsoft_opentelemetry = None  # type: ignore[assignment]
     _AVAILABLE = False
     _IMPORT_ERROR = import_error
@@ -67,17 +78,34 @@ def configure_observability() -> None:
     logger.info("Microsoft OpenTelemetry configured for LangchainOA")
 
 
-@contextmanager
-def observability_context(turn_context: Any, conversation_id: str) -> Iterator[None]:
-    """Attach non-secret Agent 365 identity and channel baggage to one turn.
+class TurnTelemetry:
+    """Handle yielded for one turn; records the final response when allowed."""
 
-    The LangChain instrumentation emits the ``invoke_agent``, ``chat``, and
-    ``execute_tool`` spans; this baggage supplies the Agent 365 attributes those
-    spans need. Spans created outside this block are dropped for missing identity.
+    def __init__(self, scope: Any = None) -> None:
+        self._scope = scope
+
+    def record_response(self, text: str) -> None:
+        if self._scope is not None and text and settings.enable_a365_sensitive_data:
+            self._scope.record_response(text)
+
+
+@contextmanager
+def observability_context(
+    turn_context: Any,
+    conversation_id: str,
+    input_text: str | None = None,
+) -> Iterator[TurnTelemetry]:
+    """Attach Agent 365 identity baggage and open the turn's ``invoke_agent`` span.
+
+    Agent 365 builds a run from its root ``invoke_agent`` span: Defender's
+    agent-activity views and the Microsoft 365 admin center ignore runs without
+    one. The LangChain ``chat`` and ``execute_tool`` spans created inside this
+    block become its children, and the baggage supplies their identity
+    attributes. Message content is recorded only with ENABLE_A365_SENSITIVE_DATA.
     """
 
     if not (_configured and BaggageBuilder):
-        yield
+        yield TurnTelemetry()
         return
 
     activity = getattr(turn_context, "activity", None)
@@ -112,7 +140,73 @@ def observability_context(turn_context: Any, conversation_id: str) -> Iterator[N
         .set_pairs({"gen_ai.agent.type": "Agent365AiTeammate"})
     )
     with builder.build():
-        yield
+        scope = _start_invoke_agent(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id)
+        if scope is None:
+            yield TurnTelemetry()
+            return
+        with scope:
+            yield TurnTelemetry(scope)
+
+
+def invoke_agent_details(
+    turn_context: Any,
+    conversation_id: str,
+    input_text: str | None,
+    tenant_id: str,
+    agent_id: str,
+    blueprint_id: str,
+) -> dict[str, Any]:
+    """Build the arguments for ``InvokeAgentScope.start`` from the incoming activity."""
+
+    activity = getattr(turn_context, "activity", None)
+    sender = getattr(activity, "from_property", None) or getattr(activity, "from_", None)
+    recipient = getattr(activity, "recipient", None)
+    hostname, port = _server_parts(_value(activity, "service_url", "serviceUrl"))
+    recipient_id = _value(recipient, "id")
+    return {
+        "request": Request(
+            content=[input_text] if input_text and settings.enable_a365_sensitive_data else None,
+            session_id=conversation_id,
+            conversation_id=conversation_id,
+            channel=Channel(name=_value(activity, "channel_id", "channelId") or "msteams"),
+        ),
+        "scope_details": InvokeAgentScopeDetails(endpoint=ServiceEndpoint(hostname=hostname, port=port)),
+        "agent_details": AgentDetails(
+            agent_id=agent_id,
+            agent_name="LangchainOA",
+            agent_description="Operations, knowledge, and email-triage AI Teammate",
+            agentic_user_id=_value(recipient, "agentic_user_id", "agenticUserId") or None,
+            agentic_user_email=_value(recipient, "agentic_user_upn", "agenticUserUpn")
+            or (recipient_id if "@" in recipient_id else None),
+            agent_blueprint_id=blueprint_id or None,
+            tenant_id=tenant_id,
+        ),
+        "caller_details": CallerDetails(
+            user_details=UserDetails(
+                user_id=_value(sender, "aad_object_id", "aadObjectId", "id") or None,
+                user_name=_value(sender, "name") or None,
+            )
+        ),
+    }
+
+
+def _start_invoke_agent(
+    turn_context: Any,
+    conversation_id: str,
+    input_text: str | None,
+    tenant_id: str,
+    agent_id: str,
+    blueprint_id: str,
+) -> Any:
+    if not (InvokeAgentScope and tenant_id and agent_id):
+        return None
+    try:
+        return InvokeAgentScope.start(
+            **invoke_agent_details(turn_context, conversation_id, input_text, tenant_id, agent_id, blueprint_id)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("invoke_agent span unavailable: %s", exc)
+        return None
 
 
 def runtime_identity(turn_context: Any) -> tuple[str, str]:
