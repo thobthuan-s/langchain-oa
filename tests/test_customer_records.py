@@ -139,3 +139,41 @@ def test_bound_tool_functions_are_sync_and_documented() -> None:
     for tool in build_customer_tools(resolve_customer(_sheets(), DEMO)):
         assert tool.description
         assert not inspect.iscoroutinefunction(tool.func)
+
+
+def test_site_url_finds_the_workbook_by_exact_name() -> None:
+    values = _sample_values()
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        paths.append(path)
+        if path == "/v1.0/sites/contoso.sharepoint.com:/sites/SalesandMarketing":
+            return httpx.Response(200, json={"id": "site-1"})
+        if path.startswith("/v1.0/sites/site-1/drive/root/search"):
+            return httpx.Response(200, json={"value": [
+                {"id": "old", "name": "PartnerCustomerRecords (1).xlsx", "parentReference": {"driveId": "d"}},
+                {"id": "item-9", "name": "PartnerCustomerRecords.xlsx", "parentReference": {"driveId": "drive-9"}},
+            ]})
+        sheet = path.split("/worksheets/")[1].split("/")[0]
+        return httpx.Response(200, json={"text": values.get(sheet, [])})
+
+    source = GraphWorkbookSource("https://contoso.sharepoint.com/sites/SalesandMarketing",
+                                 transport=httpx.MockTransport(handler))
+    sheets = asyncio.run(source.load("t"))
+
+    assert resolve_customer(sheets, DEMO).account_id == "ACC-001"
+    assert "/v1.0/drives/drive-9/items/item-9/workbook/worksheets/Accounts/usedRange(valuesOnly=true)" in paths
+    assert not any(path.startswith("/v1.0/shares/") for path in paths)
+
+
+def test_site_url_with_no_workbook_is_a_clear_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/v1.0/sites/site-1/drive"):
+            return httpx.Response(200, json={"value": []})
+        return httpx.Response(200, json={"id": "site-1"})
+
+    source = GraphWorkbookSource("https://contoso.sharepoint.com/sites/X", transport=httpx.MockTransport(handler))
+
+    with pytest.raises(customer_records.CustomerRecordsError, match="found 0"):
+        asyncio.run(source.load("t"))

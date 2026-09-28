@@ -182,6 +182,18 @@ def html_to_text(value: str | None, max_chars: int | None = None) -> str:
     return text[:limit]
 
 
+_SAFETY_BANNER_RE = re.compile(
+    r"^\s*(you don['’]t often get email from .*|learn why this is important\.?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def strip_safety_banners(text: str) -> str:
+    """Remove Outlook's first-contact safety tip, which is added to the body by Exchange."""
+
+    return re.sub(r"\n{3,}", "\n\n", _SAFETY_BANNER_RE.sub("", text)).strip()
+
+
 def text_to_email_html(text: str) -> str:
     """Render approved plain text as escaped HTML paragraphs."""
 
@@ -638,7 +650,7 @@ class EmailTriageController:
             return
 
         conversation_id = self._conversation_key(email.conversation_id or activity.conversation.id)
-        body = html_to_text(email.html_body or activity.text or "")
+        body = strip_safety_banners(html_to_text(email.html_body or activity.text or ""))
         external = is_external_sender(sender_address, agent_address)
         _tenant_id, runtime_agent_id = runtime_identity(context)
         customer_mode = self.customer_records is not None

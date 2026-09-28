@@ -680,3 +680,12 @@ def _verified_stub():
     from types import SimpleNamespace
 
     return SimpleNamespace(verified=True)
+
+
+def test_outlook_first_contact_banner_is_removed() -> None:
+    text = html_to_text(
+        "<div>You don't often get email from a@hotmail.com. Learn why this is important</div>"
+        "<p>Hi, when does our E5 renew?</p>"
+    )
+
+    assert email_triage.strip_safety_banners(text) == "Hi, when does our E5 renew?"

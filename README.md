@@ -170,7 +170,9 @@ Setup:
    `python samples/partner/create_customer_workbook.py --owner <account-owner> --contact <your-email>`.
 2. Upload `samples/partner/PartnerCustomerRecords.xlsx` to a SharePoint library
    and share it with the agent user (read access is enough).
-3. Set `CUSTOMER_WORKBOOK_URL` to the file's URL and redeploy. The agent reads it
+3. Set `CUSTOMER_WORKBOOK_URL` to the file's URL, or to the SharePoint site URL
+   (the agent then finds `PartnerCustomerRecords.xlsx` in the site's default
+   library by exact name), and redeploy. The agent reads it
    through Microsoft Graph with its own delegated token.
 
 ### Limits

@@ -13,6 +13,7 @@ import asyncio
 import base64
 import logging
 import time
+from urllib.parse import urlparse
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -86,8 +87,10 @@ class GraphWorkbookSource:
         workbook_url: str,
         timeout_seconds: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        file_name: str = "PartnerCustomerRecords.xlsx",
     ) -> None:
         self._workbook_url = workbook_url
+        self._file_name = file_name
         self._timeout = timeout_seconds
         self._transport = transport
         self._item_path: str | None = None
@@ -110,6 +113,9 @@ class GraphWorkbookSource:
     async def _resolve_item(self, client: httpx.AsyncClient, headers: dict[str, str]) -> str:
         if self._item_path:
             return self._item_path
+        if not urlparse(self._workbook_url).path.lower().endswith((".xlsx", ".xlsm")) and "/:x:/" not in self._workbook_url:
+            self._item_path = await self._find_in_site(client, headers)
+            return self._item_path
         response = await client.get(
             f"{GRAPH_ROOT}/shares/{share_id(self._workbook_url)}/driveItem",
             headers=headers,
@@ -122,6 +128,39 @@ class GraphWorkbookSource:
             raise CustomerRecordsError("The workbook URL did not resolve to a drive item")
         self._item_path = f"/drives/{drive_id}/items/{item['id']}"
         return self._item_path
+
+
+    async def _find_in_site(self, client: httpx.AsyncClient, headers: dict[str, str]) -> str:
+        """Resolve a site URL, then find the workbook by exact name in its default library."""
+
+        parsed = urlparse(self._workbook_url.strip())
+        site_path = parsed.path.rstrip("/")
+        if not parsed.netloc or not site_path:
+            raise CustomerRecordsError("CUSTOMER_WORKBOOK_URL must be a file URL or a SharePoint site URL")
+        response = await client.get(
+            f"{GRAPH_ROOT}/sites/{parsed.netloc}:{quote(site_path)}", headers=headers, params={"$select": "id"}
+        )
+        _raise_for_graph(response, "resolve the SharePoint site")
+        site_id = response.json().get("id")
+        response = await client.get(
+            f"{GRAPH_ROOT}/sites/{site_id}/drive/root/search(q='{quote(self._file_name)}')",
+            headers=headers,
+            params={"$select": "id,name,parentReference"},
+        )
+        _raise_for_graph(response, "search the site for the workbook")
+        matches = [
+            item for item in response.json().get("value", [])
+            if str(item.get("name", "")).lower() == self._file_name.lower()
+        ]
+        if len(matches) != 1:
+            raise CustomerRecordsError(
+                f"Expected exactly one {self._file_name} in the site library, found {len(matches)}"
+            )
+        item = matches[0]
+        drive_id = (item.get("parentReference") or {}).get("driveId")
+        if not drive_id:
+            raise CustomerRecordsError("The workbook search result has no drive id")
+        return f"/drives/{drive_id}/items/{item['id']}"
 
 
 def _raise_for_graph(response: httpx.Response, action: str) -> None:
