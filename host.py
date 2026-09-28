@@ -25,6 +25,7 @@ from microsoft_agents.hosting.core import (
     Authorization,
     ClaimsIdentity,
     MemoryStorage,
+    RouteRank,
     TurnContext,
     TurnState,
 )
@@ -71,6 +72,17 @@ class LangchainOaHost:
             authorization=self.authorization,
             **_sdk_config,
         )
+        self.email_triage = None
+        if settings.enable_email_triage:
+            from email_triage import EmailTriageController
+
+            self.email_triage = EmailTriageController(
+                adapter=self.adapter,
+                storage=self.storage,
+                exchange_workiq_tokens=self._exchange_workiq_tokens,
+                exchange_purview_token=self._exchange_purview_token,
+                conversation_key=_stable_conversation_id,
+            )
         self._register_routes()
 
     def _register_routes(self) -> None:
@@ -81,13 +93,31 @@ class LangchainOaHost:
         )
 
         async def welcome(context: TurnContext, _state: TurnState) -> None:
-            await context.send_activity(
+            text = (
                 "Hi, I'm **LangchainOA**. I can search and read governed SharePoint, mail, and "
-                "calendar data, and inspect Azure resources and monitoring data. I am read-only."
+                "calendar data, and inspect Azure resources and monitoring data."
             )
+            if self.email_triage:
+                text += (
+                    " I also triage email sent to my mailbox: approvers get proposals here and answer "
+                    "`approve <code>`, `reject <code>`, `edit <code>: <text>`, or `/pending`."
+                )
+            else:
+                text += " I am read-only."
+            await context.send_activity(text)
 
         self.agent_app.conversation_update("membersAdded", **handler_config)(welcome)
         self.agent_app.message("/help", **handler_config)(welcome)
+
+        if self.email_triage:
+            from microsoft_agents_a365.notifications import AgentNotification
+
+            @AgentNotification(self.agent_app).on_email(rank=RouteRank.FIRST, **handler_config)
+            async def on_email(context: TurnContext, _state: TurnState, notification: Any) -> None:
+                try:
+                    await self.email_triage.handle_email(context, notification)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Email triage failed: %s", exc, exc_info=True)
 
         @self.agent_app.activity("message", **handler_config)
         async def on_message(context: TurnContext, _state: TurnState) -> None:
@@ -95,6 +125,8 @@ class LangchainOaHost:
 
             user_message = (context.activity.text or "").strip()
             if not user_message or user_message == "/help":
+                return
+            if self.email_triage and await self.email_triage.handle_approver_message(context):
                 return
 
             recipient = context.activity.recipient
@@ -230,7 +262,8 @@ class LangchainOaHost:
                     "model": settings.azure_openai_deployment,
                     "orchestrator": "langchain",
                     "host": "microsoft-365-agents-sdk",
-                    "read_only": True,
+                    "read_only": not settings.enable_email_triage,
+                    "email_triage": "approval" if settings.enable_email_triage else "disabled",
                     "workiq": settings.enable_workiq,
                     "observability": (
                         "export" if settings.enable_a365_observability_exporter

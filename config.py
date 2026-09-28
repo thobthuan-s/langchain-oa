@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     purview_blocked_prompt_message: str = "This request was blocked by Microsoft Purview policy."
     purview_blocked_response_message: str = "The response was blocked by Microsoft Purview policy."
 
+    # --- Email triage with Teams approval (optional) ---
+    enable_email_triage: bool = False
+    # Comma-separated Entra object IDs (or Teams user IDs) allowed to approve actions.
+    email_triage_approvers: str = ""
+    email_triage_escalation_address: str = ""
+    # Comma-separated domains treated as internal; other senders are flagged external.
+    email_triage_internal_domains: str = ""
+    email_triage_auto_tag: bool = True
+    email_triage_approval_ttl_hours: int = 72
+    email_triage_max_body_chars: int = 12000
+
     # --- Server ---
     host: str = "0.0.0.0"
     port: int = 8080

@@ -35,6 +35,9 @@ or replace:
   Log Analytics KQL queries
 - **Discover its own tools.** Work IQ catalogues change, so it lists what is
   available at runtime rather than assuming a fixed set
+- **Triage its inbox (opt-in).** Classifies email sent to its mailbox, tags it,
+  and proposes a reply or escalation that a human approves in Teams. See
+  [Email triage](#email-triage)
 
 Ask it things like *"find the HR onboarding policy in SharePoint"*,
 *"what changed in my resource group this week"*, or *"summarise the open items
@@ -42,13 +45,99 @@ in that document"*.
 
 ## What it deliberately cannot do
 
-It has **no tool** that sends mail, modifies a calendar, edits a document, or
-changes an Azure resource. That is enforced by construction, not by instructions
-in a prompt: write capability is absent from the tool set, and any Work IQ tool
-whose name implies a write is rejected by an allowlist before the model can call
-it.
+The model has **no tool** that sends mail, modifies a calendar, edits a
+document, or changes an Azure resource. That is enforced by construction, not by
+instructions in a prompt: write capability is absent from the tool set, and any
+Work IQ tool whose name implies a write is rejected by an allowlist before the
+model can call it.
 
 That makes it safe to demonstrate against real tenant data.
+
+Email triage, when enabled, adds three fixed mail operations — tag, reply, and
+escalate — that application code runs. They are not model tools. Tagging runs
+automatically; replies and escalations run only after a named approver answers
+in Teams.
+
+## Email triage
+
+Off by default. Set `ENABLE_EMAIL_TRIAGE=true` to turn it on.
+
+```text
+Email to langchainoa@<tenant>  (sent, CC'd, or forwarded by an Outlook rule)
+        |
+        v
+Agent 365 email notification --> host.py on_email route
+        |
+        +-- dedupe by email id, ignore mail from the agent itself
+        +-- Purview check on the email text (when enabled)
+        +-- model classifies with structured output and NO tools
+        +-- deterministic policy constrains the result
+        +-- tag the message: Triage/<category>, Triage/<priority>
+        |
+        v
+Proposal with a one-time code --> approver's Teams chat
+        |
+        v
+approve <code> | reject <code> | edit <code>: <text> | /pending
+        |
+        +-- reply in the original email thread
+        +-- escalate to EMAIL_TRIAGE_ESCALATION_ADDRESS
+```
+
+| Category | Typical proposal |
+|---|---|
+| `question`, `action_required`, `meeting_request` | Reply to the sender, escalate if a human decision is needed |
+| `escalation` | Always escalate |
+| `fyi` | Tag only; the approver is informed, nothing to approve |
+| `spam_or_phishing` | Never reply |
+
+Policy rules that the model cannot override:
+
+- No reply to `spam_or_phishing`, or to email flagged `prompt_injection`,
+  `credential_request`, `payment_request`, or `auto_reply`.
+- Email flagged `prompt_injection` is escalated.
+- Senders outside the agent's own domain and `EMAIL_TRIAGE_INTERNAL_DOMAINS`
+  are flagged `external_sender`.
+- The escalation recipient comes from configuration, never from the model or
+  the email.
+- Reply text is plain text, HTML-escaped before it is sent.
+- Codes are single-use and expire after `EMAIL_TRIAGE_APPROVAL_TTL_HOURS`.
+  Only IDs in `EMAIL_TRIAGE_APPROVERS` can use them.
+
+### Turn it on
+
+1. Get each approver's Entra object ID:
+   `az ad user show --id manager@contoso.com --query id -o tsv`.
+2. Set `ENABLE_EMAIL_TRIAGE=true`, `EMAIL_TRIAGE_APPROVERS=<object ids>`, and
+   optionally `EMAIL_TRIAGE_ESCALATION_ADDRESS`, then redeploy. The deploy
+   script passes these through.
+3. Each approver sends the agent any message in Teams once. That stores the
+   conversation it uses to reach them. Proposals that arrive earlier are queued
+   and delivered on the approver's next message, or with `/pending`.
+4. Send, CC, or forward mail to the agent. To triage your own inbox, add an
+   Outlook rule that forwards or redirects matching mail to the agent.
+5. Keep `Mail.ReadWrite` and `Mail.Send` on the blueprint. Triage needs them.
+
+### Verify against your tenant
+
+The Mail MCP operations are resolved at runtime by tool-name suffix:
+`updateMessage`, `reply`, and `sendMail`. Before relying on triage, confirm:
+
+- Tagging succeeds. The proposal shows `Tagged:` rather than `Tagging failed:`.
+  A failure usually means the notification's email id is not accepted as a
+  Graph message id.
+- An approved reply arrives in the original thread. The agent first replies
+  through the Agent 365 email channel and falls back to the Mail MCP `reply`
+  tool. The Teams confirmation says which path was used.
+
+### Limits
+
+- Proposals, dedupe state, and approver conversations use the host's
+  `MemoryStorage`. A restart drops pending proposals. Swap in a persistent
+  Agents SDK storage, such as Blob or Cosmos DB, before production use.
+- Draft replies use only the email text. They are not grounded in SharePoint
+  or Azure data.
+- Agent 365 notifies only for mail that reaches the agent's own mailbox.
 
 ## What it demonstrates
 
@@ -82,7 +171,7 @@ about LangChain; the Agent 365 layer does not depend on it.
 | Host | Microsoft 365 Agents SDK | aiohttp |
 | Orchestration | LangChain | `create_agent` |
 | Model | Azure OpenAI | Keyless via `DefaultAzureCredential` — no API key |
-| M365 data | Work IQ MCP | SharePoint, mail, calendar — read-only |
+| M365 data | Work IQ MCP | SharePoint, mail, calendar — read-only for the model |
 | Azure data | Azure SDKs | Resource Manager, Monitor, Log Analytics |
 | Telemetry | Microsoft OpenTelemetry Distro | Optional Agent 365 export |
 | Identity | Entra Agent ID | Blueprint → Agent Identity → agentic user |
@@ -121,9 +210,11 @@ langchain-oa/
 ├── aoai_model.py               keyless Azure OpenAI chat model
 ├── observability.py            telemetry setup and baggage
 ├── purview.py                  optional content capture and DLP
+├── email_triage.py             optional email triage and Teams approvals
 ├── token_cache.py              observability token cache
 ├── config.py                   typed settings, no secret defaults
 ├── agent-prompt.txt            system prompt
+├── triage-prompt.txt           email triage rubric
 │
 ├── tools/
 │   ├── workiq_tools.py         governed Microsoft 365 access
@@ -507,8 +598,8 @@ duplicate silently binds to the wrong blueprint.
 | Caveat | Detail |
 |---|---|
 | Blueprint secret is stored in plaintext on macOS and Linux | The CLI reports `DPAPI encryption not available on this platform` and writes the secret to `a365.generated.config.json`. Rotate it if it is printed or shared, and prefer a managed identity federated to the blueprint. |
-| Default blueprint permissions exceed what this agent uses | `a365 setup all` grants a broad Graph scope set including `Mail.Send` and `Files.ReadWrite.All`. This agent is read-only and needs almost none of them. Trim after setup. |
-| Conversation history is in-process | Pinned to one replica. Move it to a shared store before scaling out. |
+| Default blueprint permissions exceed what this agent uses | `a365 setup all` grants a broad Graph scope set including `Mail.Send` and `Files.ReadWrite.All`. The read-only baseline needs almost none of them. Trim after setup, but keep `Mail.ReadWrite` and `Mail.Send` if email triage is enabled. |
+| Conversation history is in-process | Pinned to one replica. Move it to a shared store before scaling out. Email triage proposals are in-process too. |
 | Work IQ needs delegated per-audience tokens | Before an instance exists, or without the matching local `BEARER_TOKEN_MCP_*`, those tools return a clear error and the rest of the agent still works. |
 | ACR Tasks regional gaps | Set `ACR_LOCATION` to a supported region if `az acr build` fails with `NoRegisteredProviderFound`. |
 
@@ -525,16 +616,21 @@ duplicate silently binds to the wrong blueprint.
   in request-scoped context, so a prompt cannot exfiltrate them.
 - Work IQ tool names are filtered by a read-only allowlist before invocation.
   Anything resembling a write is rejected before the call is made.
+- Email triage write operations are code paths, not model tools. The model's
+  triage call has no tools. Outbound mail needs a human approval code.
 
 ---
 
 ## Optional extensions
 
-Mail actions are deliberately excluded to keep this baseline read-only.
+Mail actions are excluded from the model's tool set to keep this baseline
+read-only. Approval-gated mail actions are available through
+[Email triage](#email-triage).
 
 | Extension | How |
 |---|---|
-| Mail actions | Add prepare-and-confirm tools that require an explicit confirmation code from the same requester, and store pending actions outside process memory |
+| Persistent triage state | Pass a Blob or Cosmos DB Agents SDK storage to the host instead of `MemoryStorage` |
+| Grounded triage replies | Research with the read-only tools before drafting, keeping the approval gate |
 
 Conversation history is in-process. Move it to a shared store before running
 more than one replica.

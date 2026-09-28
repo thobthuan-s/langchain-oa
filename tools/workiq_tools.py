@@ -1,4 +1,8 @@
-"""Governed read-only Work IQ MCP tools for SharePoint, mail, and calendar."""
+"""Governed Work IQ MCP tools for SharePoint, mail, and calendar.
+
+The LangChain tools exported here are read-only. ``invoke_mail_operation`` is a
+separate, code-only path used by email triage after a human approves an action.
+"""
 
 from __future__ import annotations
 
@@ -507,6 +511,60 @@ def _extract_docx_text(payload: bytes) -> str | None:
         if text.strip():
             paragraphs.append(text.strip())
     return "\n".join(paragraphs) or None
+
+
+# Fixed mail write operations used by the email-triage executor after human approval.
+# They are never registered as LangChain tools, so the model cannot invoke them.
+_MAIL_OPERATION_SUFFIXES = {
+    "tag": "updatemessage",
+    "reply": "reply",
+    "send": "sendmail",
+}
+
+
+def _normalized_tool_name(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def resolve_mail_operation(operation: str, tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the discovered Mail MCP tool for a fixed operation by exact name suffix."""
+
+    suffix = _MAIL_OPERATION_SUFFIXES.get(operation)
+    if not suffix:
+        raise WorkIqError(f"Unsupported mail operation: {operation}")
+    matches = [
+        candidate
+        for candidate in tools
+        if _normalized_tool_name(str(candidate.get("name") or "")).endswith(suffix)
+    ]
+    return min(matches, key=lambda item: len(str(item.get("name") or ""))) if matches else None
+
+
+def tool_input_properties(tool_definition: dict[str, Any]) -> dict[str, Any]:
+    schema = tool_definition.get("inputSchema") or tool_definition.get("input_schema") or {}
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    return properties if isinstance(properties, dict) else {}
+
+
+async def invoke_mail_operation(
+    operation: str,
+    build_arguments: Any,
+) -> dict[str, Any]:
+    """Run one fixed Mail MCP write operation in the current Work IQ context.
+
+    ``build_arguments`` receives the discovered tool definition so arguments can
+    follow the live input schema.
+    """
+
+    tools = await _list_tools("mail")
+    tool_definition = resolve_mail_operation(operation, tools)
+    if not tool_definition:
+        raise WorkIqError(f"No Mail MCP tool was discovered for operation '{operation}'")
+    tool_name = str(tool_definition["name"])
+    result = await _call_tool("mail", tool_name, build_arguments(tool_definition))
+    if isinstance(result, dict) and result.get("isError"):
+        raise WorkIqError(f"Mail MCP {tool_name} reported an error: {str(_bounded(result))[:500]}")
+    return {"tool": tool_name, "result": _bounded(result)}
 
 
 WORKIQ_TOOLS = [

@@ -6,5 +6,5 @@
   "surface": "a365-ai-teammate",
   "invocation": "user",
   "port": 8080,
-  "description": "Read-only Agent 365 AI Teammate using LangChain and Azure OpenAI. Governed Work IQ SharePoint, mail, and calendar reads plus read-only Azure resource and monitoring queries. Keyless model access via managed identity."
+  "description": "Read-only Agent 365 AI Teammate using LangChain and Azure OpenAI. Governed Work IQ SharePoint, mail, and calendar reads plus read-only Azure resource and monitoring queries. Optional email triage with Teams approval for replies and escalations. Keyless model access via managed identity."
 }

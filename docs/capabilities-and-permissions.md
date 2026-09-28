@@ -13,8 +13,9 @@ addressed by mentioning it rather than by launching an app.
 
 It is a **read-only operations and knowledge assistant**. It can find and
 summarise governed Microsoft 365 content, and report on Azure resources and
-monitoring data. It ships with no tool that sends mail, changes a calendar,
-edits a document, or modifies an Azure resource.
+monitoring data. It ships with no model tool that sends mail, changes a
+calendar, edits a document, or modifies an Azure resource. Opt-in email triage
+adds approval-gated mail operations that run as application code.
 
 Three properties are deliberate:
 
@@ -55,6 +56,21 @@ _BLOCKED_TERMS    = ("add", "cancel", "create", "delete", "forward", "grant",
 A tool such as `sendMail` is rejected by that filter even if the tenant exposes
 it and the model asks for it.
 
+### Email triage operations (opt-in)
+
+With `ENABLE_EMAIL_TRIAGE=true`, `email_triage.py` runs three fixed Mail MCP
+operations. They are application code, not model tools, and the model call that
+classifies email has no tools at all.
+
+| Operation | Mail MCP tool suffix | When it runs |
+|---|---|---|
+| Tag the message with `Triage/<category>` and `Triage/<priority>` | `updateMessage` | Automatically, if `EMAIL_TRIAGE_AUTO_TAG=true` |
+| Reply in the original thread | Agent 365 email channel, falling back to `reply` | After an approver sends `approve` or `edit` in Teams |
+| Escalate to `EMAIL_TRIAGE_ESCALATION_ADDRESS` | `sendMail` | After an approver sends `approve` in Teams |
+
+Only the Entra object IDs in `EMAIL_TRIAGE_APPROVERS` can approve. Codes are
+single-use and expire after `EMAIL_TRIAGE_APPROVAL_TTL_HOURS`.
+
 ---
 
 ## Permission planes
@@ -83,13 +99,15 @@ and Calendar content goes through Work IQ, not through these Graph scopes.
 |---|---|
 | `User.Read.All`, `Sites.Read.All` | Granted by the default template; application code does not call them |
 | `Chat.ReadWrite`, `ChannelMessage.Read.All`, `ChannelMessage.Send` | Granted by the default template; Activity Protocol messaging uses the Agent Data permission instead |
-| `Mail.ReadWrite`, `Mail.Send`, `Files.ReadWrite.All` | Granted by the default template; application code does not call them |
+| `Mail.ReadWrite`, `Mail.Send` | Granted by the default template; used through Work IQ Mail only when email triage is enabled |
+| `Files.ReadWrite.All` | Granted by the default template; application code does not call it |
 | `Content.Process.User`, `ProtectionScopes.Compute.User`, `ContentActivity.Write` | Used by `purview.py` when Purview is enabled |
 
 > **Least privilege.** The default template grants write scopes — `Mail.Send`,
-> `Mail.ReadWrite`, `Files.ReadWrite.All` — that this agent never uses. The code
-> cannot write, but the *identity* is permitted to. Trim them for anything
-> beyond a demo. See below for how.
+> `Mail.ReadWrite`, `Files.ReadWrite.All` — that the read-only baseline never
+> uses. The model cannot write, but the *identity* is permitted to. Trim them
+> for anything beyond a demo. Keep `Mail.ReadWrite` and `Mail.Send` if email
+> triage is enabled. See below for how.
 
 ### 2. Work IQ MCP — one audience per server
 
