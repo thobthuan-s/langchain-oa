@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     email_triage_auto_tag: bool = True
     email_triage_approval_ttl_hours: int = 72
     email_triage_max_body_chars: int = 12000
+    # Ground draft replies with the read-only tools before proposing them.
+    email_triage_research: bool = True
+    # External senders get ungrounded drafts unless this is enabled, to limit data exposure.
+    email_triage_research_external: bool = False
+    email_triage_research_timeout_seconds: float = 90.0
 
     # --- Server ---
     python_environment: str = Field(default="", validation_alias="PYTHON_ENVIRONMENT")

@@ -32,6 +32,8 @@ def _triage_settings(monkeypatch):
     monkeypatch.setattr(email_triage.settings, "email_triage_auto_tag", True)
     monkeypatch.setattr(email_triage.settings, "email_triage_approval_ttl_hours", 72)
     monkeypatch.setattr(email_triage.settings, "enable_purview", False)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", False)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research_external", False)
 
 
 def _decision(**overrides) -> TriageDecision:
@@ -431,6 +433,89 @@ def test_classification_failure_still_informs_the_approver(monkeypatch) -> None:
     _continuation, sent = adapter.proactive[-1]
     assert "Automatic triage failed" in sent[0]
     assert "Nothing to approve" in sent[0]
+
+
+def test_grounded_reply_replaces_draft_and_lists_sources(monkeypatch) -> None:
+    adapter, mail_calls = _FakeAdapter(), []
+    controller = _controller(adapter, mail_calls, monkeypatch)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    research_inputs: list[str] = []
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    async def fake_research(_name, _address, body, decision):
+        from tools import workiq_tools as wt
+
+        research_inputs.append(body)
+        assert wt._access_tokens.get() == {"mail": "token"}
+        return email_triage.ResearchedReply(
+            reply_text="The migration finished on Friday.\n\nLangchainOA",
+            sources=["Migration plan.docx (SharePoint)"],
+            unresolved=["Exact cut-over time"],
+        )
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+    monkeypatch.setattr(email_triage, "research_reply", fake_research)
+
+    async def scenario():
+        await controller.handle_approver_message(_FakeContext(_teams_activity("hi")))
+        await controller.handle_email(_FakeContext(_email_activity()), _notification(_email_activity()))
+        return (await controller.store.pending())[0]
+
+    proposal = asyncio.run(scenario())
+
+    assert research_inputs == ["Hi,\n\nWhat is the status?"]
+    assert proposal.decision.reply_text.startswith("The migration finished on Friday.")
+    assert proposal.reply_sources == ["Migration plan.docx (SharePoint)"]
+    card = adapter.proactive[-1][1][0]
+    assert "Sources: Migration plan.docx (SharePoint)" in card
+    assert "Not answered: Exact cut-over time" in card
+
+
+def test_research_failure_keeps_draft_with_a_warning(monkeypatch) -> None:
+    adapter, mail_calls = _FakeAdapter(), []
+    controller = _controller(adapter, mail_calls, monkeypatch)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    async def failing_research(*_args):
+        raise RuntimeError("tool outage")
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+    monkeypatch.setattr(email_triage, "research_reply", failing_research)
+
+    async def scenario():
+        await controller.handle_email(_FakeContext(_email_activity()), _notification(_email_activity()))
+        return (await controller.store.pending())[0]
+
+    proposal = asyncio.run(scenario())
+
+    assert proposal.decision.reply_text == _decision().reply_text
+    assert "not verified" in proposal.research_note
+
+
+@pytest.mark.parametrize(
+    ("overrides", "external", "research_external", "expected"),
+    [
+        ({}, False, False, True),
+        ({}, True, False, False),
+        ({}, True, True, True),
+        ({"category": TriageCategory.FYI}, False, False, False),
+        ({"needs_reply": False, "reply_text": ""}, False, False, False),
+        ({"risk_flags": ["suspicious_link"]}, False, False, False),
+        ({"risk_flags": ["external_sender"]}, True, True, True),
+    ],
+)
+def test_should_research_policy(monkeypatch, overrides, external, research_external, expected) -> None:
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research_external", research_external)
+
+    wanted, _note = email_triage.should_research(_decision(**overrides), external)
+
+    assert wanted is expected
 
 
 def test_host_routes_email_notifications_to_triage(monkeypatch) -> None:

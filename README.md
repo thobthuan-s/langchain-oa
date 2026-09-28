@@ -72,6 +72,7 @@ Agent 365 email notification --> host.py on_email route
         +-- Purview check on the email text (when enabled)
         +-- model classifies with structured output and NO tools
         +-- deterministic policy constrains the result
+        +-- internal question? research the reply with the read-only tools
         +-- tag the message: Triage/<category>, Triage/<priority>
         |
         v
@@ -135,8 +136,11 @@ The Mail MCP operations are resolved at runtime by tool-name suffix:
 - Proposals, dedupe state, and approver conversations use the host's
   `MemoryStorage`. A restart drops pending proposals. Swap in a persistent
   Agents SDK storage, such as Blob or Cosmos DB, before production use.
-- Draft replies use only the email text. They are not grounded in SharePoint
-  or Azure data.
+- Reply research uses the same read-only tools as chat. It runs only for
+  `question`, `action_required`, and `meeting_request` email without risk
+  flags, and skips external senders unless `EMAIL_TRIAGE_RESEARCH_EXTERNAL=true`,
+  so internal data is not drafted into replies to outsiders by default. The
+  Teams proposal lists the sources used and anything left unanswered.
 - Agent 365 notifies only for mail that reaches the agent's own mailbox.
 
 ## What it demonstrates
@@ -316,7 +320,8 @@ behavior.
 | Component | Version |
 |---|---|
 | Python | 3.12 |
-| `microsoft-agents-*` (activity, hosting-core, hosting-aiohttp, authentication-msal) | 0.5.3 |
+| `microsoft-agents-*` (activity, hosting-core, hosting-aiohttp, authentication-msal) | 1.7.0 |
+| `microsoft-agents-a365-notifications` | 1.0.0 |
 | `microsoft-opentelemetry` | 1.3.5 |
 | `microsoft-agents-a365-observability-core` / `-runtime` | 1.0.0 |
 | `langchain` / `langchain-openai` | 1.x |
@@ -630,7 +635,6 @@ read-only. Approval-gated mail actions are available through
 | Extension | How |
 |---|---|
 | Persistent triage state | Pass a Blob or Cosmos DB Agents SDK storage to the host instead of `MemoryStorage` |
-| Grounded triage replies | Research with the read-only tools before drafting, keeping the approval gate |
 
 Conversation history is in-process. Move it to a shared store before running
 more than one replica.

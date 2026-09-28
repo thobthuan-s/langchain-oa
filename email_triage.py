@@ -30,6 +30,8 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 TRIAGE_PROMPT_PATH = Path(__file__).parent / "triage-prompt.txt"
+RESEARCH_PROMPT_PATH = Path(__file__).parent / "triage-research-prompt.txt"
+_RESEARCH_CATEGORIES = frozenset({"question", "action_required", "meeting_request"})
 TAG_PREFIX = "Triage"
 PENDING_COMMAND = "/pending"
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -87,6 +89,14 @@ class TriageDecision(BaseModel):
     risk_flags: list[str] = Field(default_factory=list)
 
 
+class ResearchedReply(BaseModel):
+    """Structured output of the tool-grounded reply research step."""
+
+    reply_text: str = Field(description="Plain-text reply grounded in retrieved facts.")
+    sources: list[str] = Field(default_factory=list, description="Documents or resources relied on.")
+    unresolved: list[str] = Field(default_factory=list, description="Questions that could not be answered.")
+
+
 ProposalStatus = Literal["pending", "processing", "approved", "rejected", "failed", "closed"]
 
 
@@ -108,6 +118,9 @@ class PendingProposal(BaseModel):
     tag_error: str = ""
     delivered: bool = False
     purview_blocked: bool = False
+    reply_sources: list[str] = Field(default_factory=list)
+    reply_unresolved: list[str] = Field(default_factory=list)
+    research_note: str = ""
     result: str = ""
 
     @property
@@ -276,6 +289,12 @@ def render_proposal(proposal: PendingProposal) -> str:
     step = 1
     if decision.needs_reply:
         lines.append(f"{step}. Reply to the sender:\n\n> {_quote(decision.reply_text)}")
+        if proposal.reply_sources:
+            lines.append("   Sources: " + "; ".join(proposal.reply_sources))
+        if proposal.reply_unresolved:
+            lines.append("   Not answered: " + "; ".join(proposal.reply_unresolved))
+        if proposal.research_note:
+            lines.append(f"   Note: {proposal.research_note}")
         step += 1
     if decision.escalate:
         target = settings.email_triage_escalation_address or "(no EMAIL_TRIAGE_ESCALATION_ADDRESS configured)"
@@ -443,6 +462,64 @@ async def classify_email(sender_name: str, sender_address: str, external: bool, 
     return TriageDecision.model_validate(result)
 
 
+_researcher: Any = None
+
+
+def should_research(decision: TriageDecision, external: bool) -> tuple[bool, str]:
+    """Decide whether to ground the draft with tools, and why not when skipped."""
+
+    if not (settings.email_triage_research and decision.needs_reply):
+        return False, ""
+    if decision.category.value not in _RESEARCH_CATEGORIES:
+        return False, ""
+    if decision.risk_flags and set(decision.risk_flags) - {"external_sender"}:
+        return False, "Draft not researched because the email has risk flags."
+    if external and not settings.email_triage_research_external:
+        return False, "Draft not researched: external sender (EMAIL_TRIAGE_RESEARCH_EXTERNAL=false)."
+    return True, ""
+
+
+async def research_reply(
+    sender_name: str,
+    sender_address: str,
+    body: str,
+    decision: TriageDecision,
+) -> ResearchedReply:
+    """Draft a reply with the read-only tool set and structured output."""
+
+    from langchain.agents import create_agent
+    from langchain_core.messages import HumanMessage
+
+    global _researcher
+    if _researcher is None:
+        from aoai_model import create_chat_model
+        from tools import ALL_TOOLS
+
+        _researcher = create_agent(
+            model=create_chat_model(),
+            tools=ALL_TOOLS,
+            system_prompt=RESEARCH_PROMPT_PATH.read_text(encoding="utf-8"),
+            response_format=ResearchedReply,
+            name="LangchainOA-triage-research",
+        )
+    content = (
+        f"Triage summary: {decision.summary}\n"
+        f"Initial draft (not yet verified):\n{decision.reply_text}\n\n"
+        f"Sender: {sender_name} <{sender_address}>\n\n"
+        f"<email_body>\n{body}\n</email_body>"
+    )
+    result = await _researcher.ainvoke(
+        {"messages": [HumanMessage(content=content)]},
+        {"recursion_limit": 12},
+    )
+    structured = result.get("structured_response") if isinstance(result, dict) else None
+    if isinstance(structured, ResearchedReply):
+        return structured
+    if structured is None:
+        raise ValueError("Research step returned no structured reply")
+    return ResearchedReply.model_validate(structured)
+
+
 # --- Controller -------------------------------------------------------------------
 
 TokenExchange = Callable[[Any], Awaitable[dict[str, str]]]
@@ -524,6 +601,11 @@ class EmailTriageController:
                         needs_reply=False,
                         escalate=False,
                     )
+                research, research_note = await self._ground_reply(
+                    context, sender_name, sender_address, external, body, decision
+                )
+                if research:
+                    decision = decision.model_copy(update={"reply_text": research.reply_text.strip()[:_MAX_REPLY_CHARS]})
                 if decision.reply_text and should_enforce_block(
                     await capture_purview_response(purview_turn, decision.reply_text)
                 ):
@@ -531,6 +613,10 @@ class EmailTriageController:
                 proposal = self._new_proposal(
                     activity, email.id, sender_address, sender_name, external, body[:_EXCERPT_CHARS], decision
                 )
+                proposal.research_note = research_note
+                if research:
+                    proposal.reply_sources = [item.strip()[:300] for item in research.sources if item.strip()][:8]
+                    proposal.reply_unresolved = [item.strip()[:300] for item in research.unresolved if item.strip()][:5]
                 if not proposal.has_outbound_actions:
                     proposal.status = "closed"
                 if settings.email_triage_auto_tag:
@@ -544,6 +630,43 @@ class EmailTriageController:
                 "Triage proposal %s is queued: no approver has chatted with the agent in Teams yet",
                 proposal.code,
             )
+
+    async def _ground_reply(
+        self,
+        context: Any,
+        sender_name: str,
+        sender_address: str,
+        external: bool,
+        body: str,
+        decision: TriageDecision,
+    ) -> tuple[ResearchedReply | None, str]:
+        """Return a tool-grounded reply, or None with a note explaining why it was skipped."""
+
+        from tools.workiq_tools import reset_workiq_context, set_workiq_context
+
+        wanted, note = should_research(decision, external)
+        if not wanted:
+            return None, note
+        recipient = context.activity.recipient
+        resets = set_workiq_context(
+            await self._exchange_workiq_tokens(context),
+            _account_value(recipient, "tenant_id", "tenantId") or settings.tenant_id,
+            _account_value(recipient, "agentic_app_id", "agenticAppId") or settings.workiq_consumer_id,
+            settings.workiq_environment_id,
+        )
+        try:
+            research = await asyncio.wait_for(
+                research_reply(sender_name, sender_address, body, decision),
+                timeout=settings.email_triage_research_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reply research failed; keeping the unverified draft: %s", exc)
+            return None, "Research failed; this draft is not verified against your data."
+        finally:
+            reset_workiq_context(resets)
+        if not research.reply_text.strip():
+            return None, "Research produced no reply; this draft is not verified against your data."
+        return research, ""
 
     def _new_proposal(
         self,

@@ -1,10 +1,10 @@
 # Microsoft 365 Agents SDK hosting
 aiohttp==3.13.5
 python-dotenv==1.2.1
-microsoft-agents-activity==0.5.3
-microsoft-agents-authentication-msal==0.5.3
-microsoft-agents-hosting-aiohttp==0.5.3
-microsoft-agents-hosting-core==0.5.3
+microsoft-agents-activity==1.7.0
+microsoft-agents-authentication-msal==1.7.0
+microsoft-agents-hosting-aiohttp==1.7.0
+microsoft-agents-hosting-core==1.7.0
 
 # LangChain + Azure OpenAI
 langchain>=1.0.0,<2.0.0

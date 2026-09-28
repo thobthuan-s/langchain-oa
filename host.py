@@ -238,14 +238,18 @@ class LangchainOaHost:
         if needs_client_secret(auth_type) and not client_secret:
             logger.warning("Activity Protocol credentials are incomplete; only local evaluation can be used")
             return None
+        federated_client_id = settings.service_connection_federated_client_id.strip()
+        if auth_type.lower() == "federatedcredentials" and not federated_client_id:
+            logger.warning("FederatedCredentials needs the managed identity client id in FEDERATEDCLIENTID")
+            return None
         scopes = [scope.strip() for scope in settings.service_connection_scopes.split(",") if scope.strip()]
         return AgentAuthConfiguration(
             auth_type=auth_type,
             client_id=client_id,
             tenant_id=tenant_id,
-            client_secret=client_secret or None,
+            client_secret=client_secret if needs_client_secret(auth_type) else None,
+            federated_client_id=federated_client_id or None,
             scopes=scopes,
-            FEDERATEDCLIENTID=settings.service_connection_federated_client_id or None,
         )
 
     def start(self) -> None:
