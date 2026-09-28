@@ -53,3 +53,20 @@ def test_federated_credentials_configuration(monkeypatch) -> None:
     assert config.AUTH_TYPE == "FederatedCredentials"
     assert config.FEDERATED_CLIENT_ID == "mi-client-id"
     assert config.CLIENT_SECRET is None
+
+
+def test_turn_errors_do_not_echo_exception_text() -> None:
+    import asyncio
+
+    import host
+
+    class _Context:
+        sent: list = []
+
+        async def send_activity(self, activity):
+            self.sent.append(activity)
+
+    context = _Context()
+    asyncio.run(host._on_turn_error(context, RuntimeError("AuthorizationFailure RequestId:secret-detail")))
+
+    assert context.sent == ["Sorry, something went wrong on my side. Please try again shortly."]

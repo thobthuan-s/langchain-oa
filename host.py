@@ -61,6 +61,7 @@ class LangchainOaHost:
         self.auth_handler_name = settings.auth_handler_name.strip() or None
         self.connection_manager = _create_connection_manager()
         self.adapter = CloudAdapter(connection_manager=self.connection_manager)
+        self.adapter.on_turn_error = _on_turn_error
         self.authorization = (
             Authorization(self.storage, self.connection_manager, **_sdk_config)
             if self.connection_manager
@@ -377,6 +378,16 @@ def run_host() -> None:
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     configure_observability()
     LangchainOaHost().start()
+
+
+async def _on_turn_error(context: TurnContext, error: Exception) -> None:
+    """Log unhandled turn errors without echoing exception text to users."""
+
+    logger.error("Unhandled turn error: %s", error, exc_info=error)
+    try:
+        await context.send_activity("Sorry, something went wrong on my side. Please try again shortly.")
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not send the turn error message")
 
 
 def create_state_storage() -> Any:
