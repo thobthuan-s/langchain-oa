@@ -74,6 +74,7 @@ class LangchainOaHost:
         )
         self.email_triage = None
         if settings.enable_email_triage:
+            from customer_records import records_from_settings
             from email_triage import EmailTriageController
 
             self.email_triage = EmailTriageController(
@@ -82,6 +83,8 @@ class LangchainOaHost:
                 exchange_workiq_tokens=self._exchange_workiq_tokens,
                 exchange_purview_token=self._exchange_purview_token,
                 conversation_key=_stable_conversation_id,
+                customer_records=records_from_settings(),
+                exchange_graph_token=self._exchange_graph_token,
             )
         self._register_routes()
 
@@ -198,6 +201,24 @@ class LangchainOaHost:
             logger.warning("Purview token exchange unavailable: %s", exc)
             return None
 
+    async def _exchange_graph_token(self, context: TurnContext) -> str | None:
+        """Mint the agent's delegated Graph token used to read the customer workbook."""
+
+        from customer_records import GRAPH_SCOPES
+
+        if not (self.authorization and self.auth_handler_name):
+            return None
+        try:
+            response = await self.authorization.exchange_token(
+                context,
+                scopes=GRAPH_SCOPES,
+                auth_handler_id=self.auth_handler_name,
+            )
+            return getattr(response, "token", None)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graph token exchange unavailable: %s", exc)
+            return None
+
     async def _cache_observability_token(self, context: TurnContext) -> None:
         """Exchange and cache the delegated exporter token for this runtime turn."""
 
@@ -274,6 +295,7 @@ class LangchainOaHost:
                     "host": "microsoft-365-agents-sdk",
                     "read_only": not settings.enable_email_triage,
                     "email_triage": "approval" if settings.enable_email_triage else "disabled",
+                    "customer_records": bool(settings.customer_workbook_url.strip()),
                     "workiq": settings.enable_workiq,
                     "observability": (
                         "export" if settings.enable_a365_observability_exporter

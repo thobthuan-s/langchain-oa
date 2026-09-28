@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     email_triage_research_external: bool = False
     email_triage_research_timeout_seconds: float = 90.0
 
+    # --- Partner customer records (optional) ---
+    # SharePoint URL of the customer records workbook. When set, email triage
+    # resolves senders to customer accounts and researches with bound tools only.
+    customer_workbook_url: str = ""
+    customer_records_cache_seconds: int = 60
+
     # --- Server ---
     python_environment: str = Field(default="", validation_alias="PYTHON_ENVIRONMENT")
     host: str = "0.0.0.0"

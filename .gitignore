@@ -20,3 +20,6 @@ manifest/
 
 # macOS
 .DS_Store
+
+# Generated sample data can contain real addresses
+samples/partner/*.xlsx

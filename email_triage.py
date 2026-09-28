@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 TRIAGE_PROMPT_PATH = Path(__file__).parent / "triage-prompt.txt"
 RESEARCH_PROMPT_PATH = Path(__file__).parent / "triage-research-prompt.txt"
+CUSTOMER_PROMPT_PATH = Path(__file__).parent / "triage-customer-prompt.txt"
 _RESEARCH_CATEGORIES = frozenset({"question", "action_required", "meeting_request"})
+_RESEARCH_OK_FLAGS = frozenset({"external_sender", "commercial_commitment"})
 TAG_PREFIX = "Triage"
 PENDING_COMMAND = "/pending"
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -71,6 +73,7 @@ ALLOWED_RISK_FLAGS = frozenset(
         "payment_request",
         "sensitive_data",
         "auto_reply",
+        "commercial_commitment",
     }
 )
 _NO_REPLY_FLAGS = frozenset({"prompt_injection", "credential_request", "payment_request", "auto_reply"})
@@ -116,6 +119,8 @@ class PendingProposal(BaseModel):
     tags: list[str] = Field(default_factory=list)
     tags_applied: bool = False
     tag_error: str = ""
+    customer_label: str = ""
+    escalation_target: str = ""
     delivered: bool = False
     purview_blocked: bool = False
     reply_sources: list[str] = Field(default_factory=list)
@@ -220,14 +225,33 @@ def apply_policy(decision: TriageDecision, external: bool) -> TriageDecision:
     escalate = decision.escalate or decision.category == TriageCategory.ESCALATION
     if "prompt_injection" in flags and decision.category != TriageCategory.SPAM_OR_PHISHING:
         escalate = True
+    reason = decision.escalation_reason.strip()
+    if "commercial_commitment" in flags:
+        escalate = True
+        reason = reason or "Commercial request (pricing, credit, cancellation, or contract change) needs a human."
     return decision.model_copy(
         update={
             "summary": decision.summary.strip()[:_MAX_SUMMARY_CHARS],
             "needs_reply": needs_reply,
             "reply_text": reply_text,
             "escalate": escalate,
-            "escalation_reason": decision.escalation_reason.strip()[:_MAX_REASON_CHARS] if escalate else "",
+            "escalation_reason": reason[:_MAX_REASON_CHARS] if escalate else "",
             "risk_flags": sorted(flags),
+        }
+    )
+
+
+def apply_customer_policy(decision: TriageDecision, customer: Any, customer_mode: bool) -> TriageDecision:
+    """A known customer domain with an unlisted sender gets no reply and goes to the account owner."""
+
+    if not customer_mode or customer is None or customer.verified:
+        return decision
+    return decision.model_copy(
+        update={
+            "needs_reply": False,
+            "reply_text": "",
+            "escalate": True,
+            "escalation_reason": "Sender uses a customer domain but is not a listed contact.",
         }
     )
 
@@ -271,6 +295,8 @@ def render_proposal(proposal: PendingProposal) -> str:
         f"- From: {sender}{' (external)' if proposal.external else ''}",
         f"- Category: {decision.category.value} · Priority: {decision.priority.value}",
     ]
+    if proposal.customer_label:
+        lines.insert(2, f"- Customer: {proposal.customer_label}")
     if decision.risk_flags:
         lines.append(f"- Risk flags: {', '.join(decision.risk_flags)}")
     lines.append(f"- Summary: {decision.summary or '(none)'}")
@@ -297,7 +323,11 @@ def render_proposal(proposal: PendingProposal) -> str:
             lines.append(f"   Note: {proposal.research_note}")
         step += 1
     if decision.escalate:
-        target = settings.email_triage_escalation_address or "(no EMAIL_TRIAGE_ESCALATION_ADDRESS configured)"
+        target = (
+            proposal.escalation_target
+            or settings.email_triage_escalation_address
+            or "(no EMAIL_TRIAGE_ESCALATION_ADDRESS configured)"
+        )
         lines.append(f"{step}. Escalate to {target}: {decision.escalation_reason or 'human decision needed'}")
     lines.append(
         f"\nAnswer `approve {proposal.code}`, `reject {proposal.code}`, "
@@ -463,17 +493,33 @@ async def classify_email(sender_name: str, sender_address: str, external: bool, 
 
 
 _researcher: Any = None
+_research_model: Any = None
 
 
-def should_research(decision: TriageDecision, external: bool) -> tuple[bool, str]:
-    """Decide whether to ground the draft with tools, and why not when skipped."""
+def should_research(
+    decision: TriageDecision,
+    external: bool,
+    customer: Any = None,
+    customer_mode: bool = False,
+) -> tuple[bool, str]:
+    """Decide whether to ground the draft with tools, and why not when skipped.
+
+    In customer mode only verified contacts are researched, and only with tools
+    bound to their account, so the external-sender switch does not apply.
+    """
 
     if not (settings.email_triage_research and decision.needs_reply):
         return False, ""
     if decision.category.value not in _RESEARCH_CATEGORIES:
         return False, ""
-    if decision.risk_flags and set(decision.risk_flags) - {"external_sender"}:
+    if decision.risk_flags and set(decision.risk_flags) - _RESEARCH_OK_FLAGS:
         return False, "Draft not researched because the email has risk flags."
+    if customer_mode:
+        if customer is None:
+            return False, "Draft not researched: sender is not in the customer records."
+        if not customer.verified:
+            return False, "Draft not researched: sender is not a listed contact."
+        return True, ""
     if external and not settings.email_triage_research_external:
         return False, "Draft not researched: external sender (EMAIL_TRIAGE_RESEARCH_EXTERNAL=false)."
     return True, ""
@@ -484,31 +530,52 @@ async def research_reply(
     sender_address: str,
     body: str,
     decision: TriageDecision,
+    customer: Any = None,
 ) -> ResearchedReply:
-    """Draft a reply with the read-only tool set and structured output."""
+    """Draft a reply with structured output.
+
+    Without a customer, the general read-only tool set is used. With a customer,
+    a fresh agent gets only the lookup tools bound to that customer's account.
+    """
 
     from langchain.agents import create_agent
     from langchain_core.messages import HumanMessage
 
-    global _researcher
-    if _researcher is None:
-        from aoai_model import create_chat_model
-        from tools import ALL_TOOLS
+    from aoai_model import create_chat_model
 
-        _researcher = create_agent(
-            model=create_chat_model(),
-            tools=ALL_TOOLS,
-            system_prompt=RESEARCH_PROMPT_PATH.read_text(encoding="utf-8"),
+    global _researcher, _research_model
+    if _research_model is None:
+        _research_model = create_chat_model()
+    if customer is not None:
+        from customer_records import build_customer_tools
+
+        agent = create_agent(
+            model=_research_model,
+            tools=build_customer_tools(customer),
+            system_prompt=CUSTOMER_PROMPT_PATH.read_text(encoding="utf-8"),
             response_format=ResearchedReply,
-            name="LangchainOA-triage-research",
+            name="LangchainOA-customer-research",
         )
+    else:
+        if _researcher is None:
+            from tools import ALL_TOOLS
+
+            _researcher = create_agent(
+                model=_research_model,
+                tools=ALL_TOOLS,
+                system_prompt=RESEARCH_PROMPT_PATH.read_text(encoding="utf-8"),
+                response_format=ResearchedReply,
+                name="LangchainOA-triage-research",
+            )
+        agent = _researcher
+    customer_line = f"Customer: {customer.describe()}\n" if customer is not None else ""
     content = (
-        f"Triage summary: {decision.summary}\n"
+        f"{customer_line}Triage summary: {decision.summary}\n"
         f"Initial draft (not yet verified):\n{decision.reply_text}\n\n"
         f"Sender: {sender_name} <{sender_address}>\n\n"
         f"<email_body>\n{body}\n</email_body>"
     )
-    result = await _researcher.ainvoke(
+    result = await agent.ainvoke(
         {"messages": [HumanMessage(content=content)]},
         {"recursion_limit": 12},
     )
@@ -536,12 +603,16 @@ class EmailTriageController:
         exchange_workiq_tokens: TokenExchange,
         exchange_purview_token: PurviewExchange,
         conversation_key: Callable[[Any], str],
+        customer_records: Any = None,
+        exchange_graph_token: PurviewExchange | None = None,
     ) -> None:
         self.adapter = adapter
         self.store = TriageStore(storage)
         self._exchange_workiq_tokens = exchange_workiq_tokens
         self._exchange_purview_token = exchange_purview_token
         self._conversation_key = conversation_key
+        self.customer_records = customer_records
+        self._exchange_graph_token = exchange_graph_token
 
     # Email notification turn ------------------------------------------------------
 
@@ -570,6 +641,10 @@ class EmailTriageController:
         body = html_to_text(email.html_body or activity.text or "")
         external = is_external_sender(sender_address, agent_address)
         _tenant_id, runtime_agent_id = runtime_identity(context)
+        customer_mode = self.customer_records is not None
+        customer, customer_label = (
+            await self._resolve_customer(context, sender_address) if customer_mode else (None, "")
+        )
 
         with observability_context(context, conversation_id):
             purview_turn = await begin_purview_turn(
@@ -592,6 +667,7 @@ class EmailTriageController:
                     decision = apply_policy(
                         await classify_email(sender_name, sender_address, external, body), external
                     )
+                    decision = apply_customer_policy(decision, customer, customer_mode)
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Email classification failed: %s", exc, exc_info=True)
                     decision = TriageDecision(
@@ -602,7 +678,7 @@ class EmailTriageController:
                         escalate=False,
                     )
                 research, research_note = await self._ground_reply(
-                    context, sender_name, sender_address, external, body, decision
+                    context, sender_name, sender_address, external, body, decision, customer, customer_mode
                 )
                 if research:
                     decision = decision.model_copy(update={"reply_text": research.reply_text.strip()[:_MAX_REPLY_CHARS]})
@@ -614,6 +690,24 @@ class EmailTriageController:
                     activity, email.id, sender_address, sender_name, external, body[:_EXCERPT_CHARS], decision
                 )
                 proposal.research_note = research_note
+                proposal.customer_label = customer_label
+                if customer is not None and customer.account_owner:
+                    proposal.escalation_target = customer.account_owner
+                logger.info(
+                    "Email triaged: code=%s account=%s verified=%s category=%s priority=%s needs_reply=%s "
+                    "escalate=%s flags=%s external=%s researched=%s note=%s",
+                    proposal.code,
+                    customer.account_id if customer is not None else "-",
+                    customer.verified if customer is not None else "-",
+                    decision.category.value,
+                    decision.priority.value,
+                    decision.needs_reply,
+                    decision.escalate,
+                    ",".join(decision.risk_flags) or "-",
+                    external,
+                    research is not None,
+                    research_note or "-",
+                )
                 if research:
                     proposal.reply_sources = [item.strip()[:300] for item in research.sources if item.strip()][:8]
                     proposal.reply_unresolved = [item.strip()[:300] for item in research.unresolved if item.strip()][:5]
@@ -639,12 +733,14 @@ class EmailTriageController:
         external: bool,
         body: str,
         decision: TriageDecision,
+        customer: Any = None,
+        customer_mode: bool = False,
     ) -> tuple[ResearchedReply | None, str]:
         """Return a tool-grounded reply, or None with a note explaining why it was skipped."""
 
         from tools.workiq_tools import reset_workiq_context, set_workiq_context
 
-        wanted, note = should_research(decision, external)
+        wanted, note = should_research(decision, external, customer, customer_mode)
         if not wanted:
             return None, note
         recipient = context.activity.recipient
@@ -656,7 +752,7 @@ class EmailTriageController:
         )
         try:
             research = await asyncio.wait_for(
-                research_reply(sender_name, sender_address, body, decision),
+                research_reply(sender_name, sender_address, body, decision, customer),
                 timeout=settings.email_triage_research_timeout_seconds,
             )
         except Exception as exc:  # noqa: BLE001
@@ -667,6 +763,23 @@ class EmailTriageController:
         if not research.reply_text.strip():
             return None, "Research produced no reply; this draft is not verified against your data."
         return research, ""
+
+    async def _resolve_customer(self, context: Any, sender_address: str) -> tuple[Any, str]:
+        """Resolve the sender to one customer account; never raises."""
+
+        from customer_records import resolve_customer
+
+        try:
+            token = await self._exchange_graph_token(context) if self._exchange_graph_token else None
+            if not token:
+                raise RuntimeError("no Graph token for the customer workbook")
+            customer = resolve_customer(await self.customer_records.sheets(token), sender_address)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Customer records unavailable: %s", exc)
+            return None, "Customer records unavailable; sender not checked."
+        if customer is None:
+            return None, "Not found in customer records."
+        return customer, customer.describe()
 
     def _new_proposal(
         self,
@@ -810,14 +923,15 @@ class EmailTriageController:
     async def _escalate(self, context: Any, proposal: PendingProposal) -> str:
         from tools.workiq_tools import tool_input_properties
 
-        target = settings.email_triage_escalation_address.strip()
+        target = (proposal.escalation_target or settings.email_triage_escalation_address).strip()
         if not target:
-            return "Escalation skipped: EMAIL_TRIAGE_ESCALATION_ADDRESS is not set."
+            return "Escalation skipped: no account owner or EMAIL_TRIAGE_ESCALATION_ADDRESS is set."
         decision = proposal.decision
         subject = f"[Escalation] Email from {proposal.sender_name or proposal.sender_address}"[:200]
         body = text_to_email_html(
             f"LangchainOA escalated an email (approval code {proposal.code}).\n\n"
             f"From: {proposal.sender_name} <{proposal.sender_address}>\n"
+            f"{('Customer: ' + proposal.customer_label + chr(10)) if proposal.customer_label else ''}"
             f"Category: {decision.category.value}, priority: {decision.priority.value}\n"
             f"Reason: {decision.escalation_reason or 'human decision needed'}\n\n"
             f"Summary: {decision.summary}\n\nExcerpt:\n{proposal.excerpt}"

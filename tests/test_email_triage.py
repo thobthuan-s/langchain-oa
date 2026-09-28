@@ -444,7 +444,7 @@ def test_grounded_reply_replaces_draft_and_lists_sources(monkeypatch) -> None:
     async def fake_classify(*_args):
         return _decision()
 
-    async def fake_research(_name, _address, body, decision):
+    async def fake_research(_name, _address, body, decision, customer=None):
         from tools import workiq_tools as wt
 
         research_inputs.append(body)
@@ -531,3 +531,152 @@ def test_host_routes_email_notifications_to_triage(monkeypatch) -> None:
 
     assert email_route is not teams_route
     assert email_route.rank == 0
+
+
+# --- Customer mode ----------------------------------------------------------------
+
+
+def _customer_controller(adapter, mail_calls, monkeypatch, loader=None) -> EmailTriageController:
+    from customer_records import CustomerRecords
+
+    from tests.test_customer_records import _sheets
+
+    controller = _controller(adapter, mail_calls, monkeypatch)
+
+    async def default_loader(token):
+        assert token == "graph-token"
+        return _sheets()
+
+    async def graph_token(_context):
+        return "graph-token"
+
+    controller.customer_records = CustomerRecords(loader or default_loader)
+    controller._exchange_graph_token = graph_token
+    return controller
+
+
+def _run_customer_email(controller, sender, decision, research=None):
+    async def scenario():
+        await controller.handle_approver_message(_FakeContext(_teams_activity("hi")))
+        activity = _email_activity(sender=sender, email_id=f"id-{sender}")
+        await controller.handle_email(_FakeContext(activity), _notification(activity))
+        codes = await controller.store.list_codes()
+        return await controller.store.get(codes[-1])
+
+    return asyncio.run(scenario())
+
+
+def test_verified_customer_research_uses_bound_tools_and_routes_to_owner(monkeypatch) -> None:
+    from tests.test_customer_records import DEMO, OWNER
+
+    adapter, mail_calls = _FakeAdapter(), []
+    controller = _customer_controller(adapter, mail_calls, monkeypatch)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    seen = {}
+
+    async def fake_classify(*_args):
+        return _decision(escalate=True, escalation_reason="Renewal decision.")
+
+    async def fake_research(_name, _address, _body, _decision, customer=None):
+        from customer_records import build_customer_tools
+
+        seen["customer"] = customer
+        seen["tools"] = sorted(tool.name for tool in build_customer_tools(customer))
+        return email_triage.ResearchedReply(
+            reply_text="Your Microsoft 365 E5 term ends on 2026-10-20.",
+            sources=["Subscription Microsoft 365 E5 (250 seats, term ends 2026-10-20)"],
+        )
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+    monkeypatch.setattr(email_triage, "research_reply", fake_research)
+
+    proposal = _run_customer_email(controller, DEMO, _decision())
+
+    assert seen["customer"].account_id == "ACC-001"
+    assert "get_invoice" in seen["tools"]
+    assert proposal.escalation_target == OWNER
+    assert proposal.customer_label.startswith("Contoso Ltd (Gold)")
+    card = adapter.proactive[-1][1][0]
+    assert "- Customer: Contoso Ltd (Gold) · Demo Contact, IT Director, verified, billing authorized" in card
+    assert f"Escalate to {OWNER}" in card
+
+
+def test_unverified_customer_contact_gets_no_draft_and_goes_to_owner(monkeypatch) -> None:
+    from tests.test_customer_records import OWNER
+
+    adapter, mail_calls = _FakeAdapter(), []
+    controller = _customer_controller(adapter, mail_calls, monkeypatch)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    async def must_not_research(*_args, **_kwargs):
+        raise AssertionError("unverified senders must not be researched")
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+    monkeypatch.setattr(email_triage, "research_reply", must_not_research)
+
+    proposal = _run_customer_email(controller, "someone@tailspintoys.com", _decision())
+
+    assert proposal.decision.needs_reply is False and proposal.decision.reply_text == ""
+    assert proposal.decision.escalate is True
+    assert proposal.escalation_target == OWNER
+    assert "not a listed contact" in proposal.customer_label
+
+
+def test_unknown_sender_in_customer_mode_is_not_researched(monkeypatch) -> None:
+    adapter, mail_calls = _FakeAdapter(), []
+    controller = _customer_controller(adapter, mail_calls, monkeypatch)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    monkeypatch.setattr(email_triage.settings, "email_triage_research_external", True)
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    async def must_not_research(*_args, **_kwargs):
+        raise AssertionError("unknown senders must not be researched")
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+    monkeypatch.setattr(email_triage, "research_reply", must_not_research)
+
+    proposal = _run_customer_email(controller, "stranger@unknown.example", _decision())
+
+    assert proposal.customer_label == "Not found in customer records."
+    assert "not in the customer records" in proposal.research_note
+    assert proposal.escalation_target == ""
+
+
+def test_customer_records_outage_is_reported_not_raised(monkeypatch) -> None:
+    adapter, mail_calls = _FakeAdapter(), []
+
+    async def failing_loader(_token):
+        raise RuntimeError("Graph down")
+
+    controller = _customer_controller(adapter, mail_calls, monkeypatch, loader=failing_loader)
+
+    async def fake_classify(*_args):
+        return _decision()
+
+    monkeypatch.setattr(email_triage, "classify_email", fake_classify)
+
+    proposal = _run_customer_email(controller, "demo@partner-test.com", _decision())
+
+    assert proposal.customer_label == "Customer records unavailable; sender not checked."
+
+
+def test_commercial_requests_are_escalated_but_still_acknowledged(monkeypatch) -> None:
+    monkeypatch.setattr(email_triage.settings, "email_triage_research", True)
+    decision = apply_policy(_decision(risk_flags=["commercial_commitment"], escalate=False), external=True)
+
+    assert decision.escalate is True
+    assert decision.needs_reply is True
+    assert "Commercial request" in decision.escalation_reason
+    wanted, _ = email_triage.should_research(decision, True, customer=_verified_stub(), customer_mode=True)
+    assert wanted is True
+
+
+def _verified_stub():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(verified=True)
