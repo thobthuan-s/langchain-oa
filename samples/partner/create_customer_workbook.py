@@ -2,6 +2,7 @@
 
 Usage:
     python samples/partner/create_customer_workbook.py [--owner you@contoso.com] [--contact you@contoso.com]
+        [--contact-name "Your Name"]
 
 --owner   receives escalations for every sample account (the account owner).
 --contact is added as a verified, billing-authorized Contoso contact so you can
@@ -20,7 +21,7 @@ from openpyxl.utils import get_column_letter
 OUTPUT = Path(__file__).with_name("PartnerCustomerRecords.xlsx")
 
 
-def build(owner: str, contact: str) -> dict[str, list[list[str]]]:
+def build(owner: str, contact: str, contact_name: str = "Demo Contact") -> dict[str, list[list[str]]]:
     return {
         "Accounts": [
             ["AccountId", "AccountName", "Domains", "Tier", "AccountOwnerEmail", "SupportSLA", "Status"],
@@ -31,7 +32,7 @@ def build(owner: str, contact: str) -> dict[str, list[list[str]]]:
         ],
         "Contacts": [
             ["ContactEmail", "AccountId", "Name", "Role", "BillingAuthorized"],
-            [contact, "ACC-001", "Demo Contact", "IT Director", "Yes"],
+            [contact, "ACC-001", contact_name, "IT Director", "Yes"],
             ["megan.bowen@contoso.com", "ACC-001", "Megan Bowen", "IT Administrator", "No"],
             ["alex.wilber@fabrikam.com", "ACC-002", "Alex Wilber", "Finance Manager", "Yes"],
             ["lee.gu@northwindtraders.com", "ACC-003", "Lee Gu", "Operations Lead", "No"],
@@ -121,9 +122,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--owner", default="owner@contoso.com", help="Account owner email for escalations")
     parser.add_argument("--contact", default="demo@contoso.com", help="Your email, added as a Contoso contact")
+    parser.add_argument("--contact-name", default="Demo Contact", help="Display name for your contact row")
     parser.add_argument("--output", type=Path, default=OUTPUT)
     args = parser.parse_args()
-    write(args.output, build(args.owner, args.contact))
+    write(args.output, build(args.owner, args.contact, args.contact_name))
     print(f"Wrote {args.output}")
 
 
