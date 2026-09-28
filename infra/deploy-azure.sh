@@ -35,7 +35,15 @@ AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-}"
 AZURE_OPENAI_ACCOUNT_ID="${AZURE_OPENAI_ACCOUNT_ID:-}"
 
 # Purview content capture is opt-in; blocking additionally requires a DLP policy.
+# When unset, keep whatever the running app already has so a redeploy never
+# silently turns governance off.
+current_app_env() {
+  az containerapp show --subscription "$SUBSCRIPTION_ID" -g "$RESOURCE_GROUP" -n "$APP_NAME" \
+    --query "properties.template.containers[0].env[?name=='$1'].value | [0]" -o tsv 2>/dev/null || true
+}
+ENABLE_PURVIEW="${ENABLE_PURVIEW:-$(current_app_env ENABLE_PURVIEW)}"
 ENABLE_PURVIEW="${ENABLE_PURVIEW:-false}"
+PURVIEW_ENFORCE_BLOCKS="${PURVIEW_ENFORCE_BLOCKS:-$(current_app_env PURVIEW_ENFORCE_BLOCKS)}"
 PURVIEW_ENFORCE_BLOCKS="${PURVIEW_ENFORCE_BLOCKS:-false}"
 
 # Email triage is opt-in. Replies and escalations always wait for a Teams approver.
@@ -70,6 +78,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "==> Subscription : $SUBSCRIPTION_ID"
 echo "==> Resource group: $RESOURCE_GROUP ($LOCATION)"
+echo "==> Purview       : capture=$ENABLE_PURVIEW enforce=$PURVIEW_ENFORCE_BLOCKS"
 echo "==> Registry      : $REGISTRY_NAME ($ACR_LOCATION)"
 
 echo "==> Resource group"
