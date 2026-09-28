@@ -25,6 +25,10 @@ ENABLE_STATE_STORAGE="${ENABLE_STATE_STORAGE:-true}"
 STATE_STORAGE_ACCOUNT="${STATE_STORAGE_ACCOUNT:-st${REGISTRY_STEM}${SUBSCRIPTION_SUFFIX}}"
 STATE_STORAGE_ACCOUNT="$(printf '%s' "$STATE_STORAGE_ACCOUNT" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]' | cut -c1-24)"
 STATE_STORAGE_CONTAINER="${STATE_STORAGE_CONTAINER:-agent-state}"
+# Network Security Perimeter for the state account. Policies that disable public
+# network access on storage exempt NSP-associated accounts; the inbound rule lets
+# managed identities in this subscription reach it and blocks everything else.
+STATE_STORAGE_NSP="${STATE_STORAGE_NSP:-nsp-${AGENT_NAME}}"
 
 AZURE_OPENAI_ENDPOINT="${AZURE_OPENAI_ENDPOINT:-}"
 AZURE_OPENAI_DEPLOYMENT="${AZURE_OPENAI_DEPLOYMENT:-}"
@@ -100,6 +104,27 @@ if [[ "$ENABLE_STATE_STORAGE" == "true" ]]; then
     az_sub storage container-rm create -g "$RESOURCE_GROUP" --storage-account "$STATE_STORAGE_ACCOUNT" \
       -n "$STATE_STORAGE_CONTAINER" --public-access off -o none
   STATE_STORAGE_ID=$(az_sub storage account show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" --query id -o tsv)
+  if [[ -n "$STATE_STORAGE_NSP" ]]; then
+    echo "==> Network security perimeter $STATE_STORAGE_NSP"
+    az_sub network perimeter show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_NSP" -o none 2>/dev/null ||
+      az_sub network perimeter create -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_NSP" -l "$LOCATION" -o none
+    az_sub network perimeter profile show -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+      -n agent-state -o none 2>/dev/null ||
+      az_sub network perimeter profile create -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+        -n agent-state -o none
+    az_sub network perimeter profile access-rule show -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+      --profile-name agent-state -n allow-subscription-mi -o none 2>/dev/null ||
+      az_sub network perimeter profile access-rule create -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+        --profile-name agent-state -n allow-subscription-mi --direction Inbound \
+        --subscriptions "[{id:/subscriptions/$SUBSCRIPTION_ID}]" -o none
+    NSP_PROFILE_ID=$(az_sub network perimeter profile show -g "$RESOURCE_GROUP" \
+      --perimeter-name "$STATE_STORAGE_NSP" -n agent-state --query id -o tsv)
+    az_sub network perimeter association show -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+      -n agent-state-storage -o none 2>/dev/null ||
+      az_sub network perimeter association create -g "$RESOURCE_GROUP" --perimeter-name "$STATE_STORAGE_NSP" \
+        -n agent-state-storage --access-mode Enforced \
+        --private-link-resource "{id:$STATE_STORAGE_ID}" --profile "{id:$NSP_PROFILE_ID}" -o none
+  fi
   STATE_BLOB_URL=$(az_sub storage account show -g "$RESOURCE_GROUP" -n "$STATE_STORAGE_ACCOUNT" \
     --query primaryEndpoints.blob -o tsv)
   STATE_ENV=("STATE_STORAGE_BLOB_URL=${STATE_BLOB_URL%/}" "STATE_STORAGE_CONTAINER=$STATE_STORAGE_CONTAINER")

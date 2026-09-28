@@ -184,6 +184,13 @@ that set, the SDK turn state, triage proposals, approver chats, the
 processed-email list, and chat history all survive restarts and redeploys, so
 approvers say "hi" once. Set `ENABLE_STATE_STORAGE=false` to keep state in memory.
 
+The account is associated with a **Network Security Perimeter** in Enforced
+mode, with one inbound rule that allows managed identities in the same
+subscription. Tenants whose Azure Policy disables public network access on
+storage (for example "SFI - Disable public network access on Storage accounts")
+exempt NSP-associated accounts, so the container app can still reach it and
+everything else is blocked. Set `STATE_STORAGE_NSP=` (empty) to skip the NSP.
+
 ### Limits
 
 - Without `STATE_STORAGE_BLOB_URL`, proposals, dedupe state, and approver
