@@ -227,6 +227,7 @@ about LangChain; the Agent 365 layer does not depend on it.
 | [Architecture](docs/architecture.md) | Diagrams of the components, startup, one turn, identity, telemetry, and routes |
 | [Deploy in your tenant](docs/deploy-in-your-tenant.md) | Clone to running agent, and every value you must change |
 | [Troubleshooting](docs/troubleshooting.md) | Real failure modes, their causes, and fixes |
+| [Observability with the OTel Distro](docs/observability-otel-distro.md) | Agent 365 telemetry guidelines, how each is implemented, and end-to-end linkage |
 
 ## Why this combination
 
