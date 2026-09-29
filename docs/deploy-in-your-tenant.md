@@ -27,9 +27,9 @@ roles, CLI install, client app registration and consent — do
 
 ## Values you must change
 
-Everything below is environment-specific. The verified `ClientSecret` path
-needs variable changes only; changing framework, model-provider shape, or
-Blueprint authentication mode is a separate migration.
+Everything below is environment-specific. Deploying needs variable changes
+only; switching the Blueprint to keyless `FederatedCredentials` is one script
+(Step 4). Changing framework or model-provider shape is a separate migration.
 
 | Value | Where | Notes |
 |---|---|---|
@@ -168,9 +168,27 @@ Then assign an Agent 365 licence to the new agent user.
 This reads the generated configuration and pushes the Activity Protocol,
 agentic auth, Blueprint, and observability values into the Container App,
 storing the Blueprint credential as a secret reference rather than a literal.
-This script implements the verified `ClientSecret` path. Federated credentials
-require the Agents SDK 1.x line plus different deployment plumbing; they are not
-enabled by changing `AUTHTYPE` alone.
+
+Then remove the secret from the deployment entirely:
+
+```bash
+LOCATION=<region> RESOURCE_GROUP=<rg> APP_NAME=<app> ./infra/enable-federated-credentials.sh
+```
+
+This creates a user-assigned managed identity, attaches it to the Container App,
+adds a federated identity credential on the Blueprint app that trusts it, and
+switches the app to `AUTHTYPE=FederatedCredentials` with no stored secret. Send
+the agent a Teams message to confirm it replies, then delete the Blueprint
+secret and clear it from `.env` and `a365.generated.config.json`:
+
+```bash
+az ad app credential list --id <blueprint-app-id>
+az ad app credential delete --id <blueprint-app-id> --key-id <key-id>
+```
+
+Set `CONNECTIONS__SERVICE_CONNECTION__SETTINGS__AUTHTYPE=FederatedCredentials`
+and `...__FEDERATEDCLIENTID=<identity client id>` in `.env` so later runs of
+`sync-a365-settings.sh` keep the app keyless.
 
 ---
 

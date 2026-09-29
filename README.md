@@ -366,15 +366,15 @@ Proving that this agent *is* the Blueprint app is a separate decision, set by
 
 | Mode | Use for | Tradeoff |
 |---|---|---|
-| `ClientSecret` (default) | Prototypes and demos | A real secret exists: it can leak, must be rotated, and expires |
-| `FederatedCredentials` | Production migration target after an SDK/deployment upgrade | Keyless. The Blueprint app trusts a managed identity, so there is no secret to store or rotate |
+| `ClientSecret` (default) | Local development and first deploy | A real secret exists: it can leak, must be rotated, and expires |
+| `FederatedCredentials` | Deployed agents (validated on SDK 1.7) | Keyless. The Blueprint app trusts a user-assigned managed identity, so there is no secret to store or rotate |
 
-> **Caveat.** This sample ships `ClientSecret` because it is the fastest path to
-> a working agent, and because `FederatedCredentials` is not implemented in the
-> pinned `microsoft-agents-* 0.5.3`; it was added in the 1.x line. Treat the
-> secret as sensitive: keep it out of source control, and rotate it if it is
-> ever printed. For production, upgrade the SDK and switch to
-> `FederatedCredentials` with a user-assigned managed identity.
+> **Caveat.** `a365 setup` creates a Blueprint client secret, so a fresh deploy
+> starts on `ClientSecret`. Treat that secret as sensitive: keep it out of source
+> control, never show `.env` or `a365.generated.config.json` on screen, and
+> rotate it if it is ever printed. Once the Container App is running, switch it
+> to `FederatedCredentials` with `infra/enable-federated-credentials.sh`, then
+> delete the secret from the Blueprint app.
 
 ### Verified stack
 
@@ -396,9 +396,10 @@ behavior.
 Validated end to end on this stack: Teams turns, Work IQ SharePoint search,
 Agent 365 observability export, and Purview prompt/response capture.
 
-`FederatedCredentials` requires the Agents SDK 1.x line and has **not** been
-validated here. The included `sync-a365-settings.sh` implements the verified
-`ClientSecret` path only; changing `AUTHTYPE` alone is not a supported migration.
+`FederatedCredentials` is validated on this stack: the Container App uses a
+user-assigned managed identity as the Blueprint's federated credential. Local
+runs cannot use a managed identity, so they need a short-lived Blueprint secret
+in `.env` with `AUTHTYPE=ClientSecret`.
 
 ---
 

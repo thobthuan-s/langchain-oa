@@ -217,8 +217,11 @@ Activity Protocol credentials are incomplete; only local evaluation can be used
 ```
 
 With `AUTHTYPE=ClientSecret`, all of `CLIENTID`, `TENANTID`, and `CLIENTSECRET`
-must be present. `FederatedCredentials` requires the Agents SDK 1.x line — it
-does not exist in `0.5.3` and will fail at token time there.
+must be present. With `AUTHTYPE=FederatedCredentials`, `CLIENTID`, `TENANTID`,
+and `FEDERATEDCLIENTID` (the user-assigned managed identity's client ID) must be
+present, the identity must be attached to the Container App, and the Blueprint
+app must have a federated credential whose subject is that identity's object
+(principal) ID. It only works where the managed identity exists, not locally.
 
 ---
 
