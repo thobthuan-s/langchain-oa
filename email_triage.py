@@ -849,16 +849,10 @@ class EmailTriageController:
         )
 
     async def _apply_tags(self, context: Any, proposal: PendingProposal) -> None:
-        from tools.workiq_tools import tool_input_properties
-
-        def arguments(tool_definition: dict[str, Any]) -> dict[str, Any]:
-            properties = tool_input_properties(tool_definition)
-            if "categories" not in properties and "message" in properties:
-                return {"id": proposal.email_id, "message": {"categories": proposal.tags}}
-            return {"id": proposal.email_id, "categories": proposal.tags}
-
         try:
-            await self._run_mail_operation(context, "tag", arguments)
+            await self._run_mail_operation(
+                context, "tag", {"message_id": proposal.email_id, "categories": proposal.tags}
+            )
             proposal.tags_applied = True
         except Exception as exc:  # noqa: BLE001
             proposal.tag_error = str(exc)[:200]
@@ -961,11 +955,15 @@ class EmailTriageController:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Email-channel reply failed, trying Mail MCP reply: %s", exc)
 
-        await self._run_mail_operation(context, "reply", lambda _tool: {"id": proposal.email_id, "comment": reply_text})
+        await self._run_mail_operation(
+            context,
+            "reply",
+            {"message_id": proposal.email_id, "comment": reply_text, "body_html": text_to_email_html(reply_text)},
+        )
         return "Reply sent through Mail."
 
     async def _escalate(self, context: Any, proposal: PendingProposal) -> str:
-        from tools.workiq_tools import tool_input_properties
+        from tools.workiq_tools import MailToolNotFound
 
         target = (proposal.escalation_target or settings.email_triage_escalation_address).strip()
         if not target:
@@ -980,34 +978,36 @@ class EmailTriageController:
             f"Reason: {decision.escalation_reason or 'human decision needed'}\n\n"
             f"Summary: {decision.summary}\n\nExcerpt:\n{proposal.excerpt}"
         )
-        message = {
-            "subject": subject,
-            "body": {"contentType": "HTML", "content": body},
-            "toRecipients": [{"emailAddress": {"address": target}}],
-        }
-
-        def arguments(tool_definition: dict[str, Any]) -> dict[str, Any]:
-            properties = tool_input_properties(tool_definition)
-            payload: dict[str, Any] = {}
-            if "message" in properties or not properties:
-                payload["message"] = message
-            for field_name in ("subject", "body", "toRecipients"):
-                if field_name in properties:
-                    payload[field_name] = message[field_name]
-            return payload
-
-        from tools.workiq_tools import MailToolNotFound
+        values = {"to": [target], "subject": subject, "body_html": body, "attachments": []}
 
         try:
-            await self._run_mail_operation(context, "send", arguments)
+            await self._run_mail_operation(context, "send", values)
+            return f"Escalated to {target}."
         except MailToolNotFound:
-            # Some Mail catalogs only expose draft-then-send.
-            draft = await self._run_mail_operation(context, "draft", arguments)
-            draft_id = extract_message_id(draft.get("result"))
-            if not draft_id:
-                raise RuntimeError("The escalation draft was created but its message id was not returned")
-            await self._run_mail_operation(context, "send_draft", lambda _tool: {"id": draft_id})
+            pass
+
+        # Last resort for catalogs without a send tool: draft, then send the draft.
+        draft = await self._run_mail_operation(context, "draft", values)
+        draft_id = extract_message_id(draft.get("result"))
+        if not draft_id:
+            logger.error("Draft response had no message id; shape=%s", describe_shape(draft.get("result")))
+            raise RuntimeError(
+                "An escalation draft was created but could not be sent; it is in the agent's Drafts folder"
+            )
+        try:
+            await self._run_mail_operation(context, "send_draft", {"message_id": draft_id})
+        except Exception:
+            await self._delete_draft(context, draft_id)
+            raise
         return f"Escalated to {target}."
+
+    async def _delete_draft(self, context: Any, draft_id: str) -> None:
+        """Remove a draft left by a failed send so no half-done message remains."""
+
+        try:
+            await self._run_mail_operation(context, "delete", {"message_id": draft_id})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not delete the unsent escalation draft: %s", exc)
 
     # Shared -----------------------------------------------------------------------
 
@@ -1015,7 +1015,7 @@ class EmailTriageController:
         self,
         context: Any,
         operation: str,
-        arguments: Callable[[dict[str, Any]], dict[str, Any]],
+        arguments: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
     ) -> dict[str, Any]:
         from tools.workiq_tools import invoke_mail_operation, reset_workiq_context, set_workiq_context
 
@@ -1068,15 +1068,20 @@ class EmailTriageController:
             await self.store.mark_delivered(proposal.code)
 
 
+_ID_KEYS = ("id", "messageId", "draftId", "itemId", "draftMessageId")
+_GRAPH_ID_RE = re.compile(r"\bAA[A-Za-z0-9_\-]{60,}={0,2}")
+
+
 def extract_message_id(value: Any) -> str:
-    """Find a Graph message id in an MCP tool result, including JSON text content."""
+    """Find a Graph message id in an MCP tool result, including JSON or plain text content."""
 
     import json
 
     if isinstance(value, dict):
-        candidate = value.get("id")
-        if isinstance(candidate, str) and len(candidate) > 20:
-            return candidate
+        for key in _ID_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and len(candidate) > 20:
+                return candidate
         for item in value.values():
             found = extract_message_id(item)
             if found:
@@ -1086,12 +1091,29 @@ def extract_message_id(value: Any) -> str:
             found = extract_message_id(item)
             if found:
                 return found
-    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
-        try:
-            return extract_message_id(json.loads(value))
-        except ValueError:
-            return ""
+    elif isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                found = extract_message_id(json.loads(value))
+                if found:
+                    return found
+            except ValueError:
+                pass
+        match = _GRAPH_ID_RE.search(value)
+        return match.group(0) if match else ""
     return ""
+
+
+def describe_shape(value: Any, depth: int = 0) -> Any:
+    """Describe a result's structure (keys and types only) for logging, without values."""
+
+    if depth > 3:
+        return "…"
+    if isinstance(value, dict):
+        return {key: describe_shape(item, depth + 1) for key, item in list(value.items())[:15]}
+    if isinstance(value, list):
+        return [describe_shape(value[0], depth + 1), f"len={len(value)}"] if value else []
+    return type(value).__name__
 
 
 def _account_value(source: Any, *names: str) -> str:

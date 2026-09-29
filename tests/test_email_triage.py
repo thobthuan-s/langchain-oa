@@ -120,7 +120,11 @@ class _FakeAdapter:
 def _controller(adapter: _FakeAdapter, mail_calls: list, monkeypatch) -> EmailTriageController:
     async def fake_invoke(operation, build_arguments):
         tool = {"name": f"mcp_MailTools_graph_mail_{operation}", "inputSchema": {"properties": {}}}
-        mail_calls.append((operation, build_arguments(tool)))
+        arguments = (
+            build_arguments(tool) if callable(build_arguments)
+            else workiq_tools.build_mail_arguments(tool, build_arguments)
+        )
+        mail_calls.append((operation, arguments))
         return {"tool": tool["name"], "result": {}}
 
     async def tokens(_context):
@@ -211,7 +215,7 @@ def test_mail_operation_resolution_uses_exact_suffixes() -> None:
     assert workiq_tools.resolve_mail_operation("tag", tools)["name"].endswith("_updateMessage")
     assert workiq_tools.resolve_mail_operation("reply", tools[2:]) is None
     with pytest.raises(workiq_tools.WorkIqError):
-        workiq_tools.resolve_mail_operation("delete", tools)
+        workiq_tools.resolve_mail_operation("archive", tools)
 
 
 def test_write_operations_are_not_exposed_to_the_model() -> None:
@@ -321,7 +325,7 @@ def test_approval_replies_in_email_thread_and_escalates(monkeypatch) -> None:
     assert entity.type == "emailResponse"
     assert entity.html_body == "<p>Thanks, the migration is on track.</p><p>LangchainOA</p>"
     send_call = [args for operation, args in mail_calls if operation == "send"][0]
-    assert send_call["message"]["toRecipients"] == [{"emailAddress": {"address": "manager@contoso.com"}}]
+    assert send_call["toRecipients"] == [{"emailAddress": {"address": "manager@contoso.com"}}]
     assert stored.status == "approved"
     assert "Reply sent in the email thread." in approve_sent[0]
     assert "Escalated to manager@contoso.com." in approve_sent[0]
@@ -809,7 +813,7 @@ def test_escalation_falls_back_to_draft_then_send(monkeypatch) -> None:
 
     async def fake_run(_context, operation, build_arguments):
         tool = {"name": f"mcp_MailTools_graph_mail_{operation}", "inputSchema": {"properties": {}}}
-        calls.append((operation, build_arguments(tool)))
+        calls.append((operation, workiq_tools.build_mail_arguments(tool, build_arguments)))
         if operation == "send":
             raise MailToolNotFound("no send tool")
         if operation == "draft":
@@ -851,3 +855,165 @@ def test_answered_customer_question_drops_the_classifier_escalation() -> None:
     commercial = _decision(escalate=True, risk_flags=["commercial_commitment"])
     assert email_triage.settle_escalation_after_research(commercial, answered, verified).escalate is True
     assert email_triage.settle_escalation_after_research(decision, answered, SimpleNamespace(verified=False)).escalate is True
+
+
+
+# --- Live Work IQ Mail catalog (names observed 2026-09-29) -------------------------
+
+LIVE_MAIL_TOOLS = [
+    {"name": name} for name in (
+        "AddDraftAttachments", "CreateDraftMessage", "DeleteAttachment", "DeleteMessage", "DownloadAttachment",
+        "FlagEmail", "ForwardMessage", "ForwardMessageWithFullThread", "GetAttachments", "GetMessage",
+        "ReplyAllToMessage", "ReplyAllWithFullThread", "ReplyToMessage", "ReplyWithFullThread", "SearchMessages",
+        "SearchMessagesQueryParameters", "SendDraftMessage", "SendEmailWithAttachments", "UpdateDraft",
+        "UpdateMessage", "UploadAttachment", "UploadLargeAttachment",
+    )
+]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [
+        ("send", "SendEmailWithAttachments"),
+        ("reply", "ReplyToMessage"),
+        ("tag", "UpdateMessage"),
+        ("draft", "CreateDraftMessage"),
+        ("send_draft", "SendDraftMessage"),
+        ("delete", "DeleteMessage"),
+    ],
+)
+def test_live_catalog_resolves_every_operation(operation, expected) -> None:
+    assert workiq_tools.resolve_mail_operation(operation, LIVE_MAIL_TOOLS)["name"] == expected
+
+
+def test_live_catalog_never_resolves_reply_to_reply_all() -> None:
+    tools = [{"name": "ReplyAllToMessage"}, {"name": "ReplyWithFullThread"}]
+
+    assert workiq_tools.resolve_mail_operation("reply", tools) is None
+
+
+def test_builder_follows_flat_schema_with_string_recipients_and_required_check() -> None:
+    tool = {
+        "name": "SendEmailWithAttachments",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "array", "items": {"type": "string"}},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "contentType": {"type": "string"},
+                "attachments": {"type": "array"},
+            },
+            "required": ["to", "subject", "body"],
+        },
+    }
+
+    arguments = workiq_tools.build_mail_arguments(
+        tool, {"to": ["owner@contoso.com"], "subject": "S", "body_html": "<p>B</p>", "attachments": []}
+    )
+
+    assert arguments == {
+        "to": ["owner@contoso.com"], "subject": "S", "body": "<p>B</p>", "contentType": "HTML", "attachments": [],
+    }
+
+
+def test_builder_shapes_graph_style_objects_and_nested_message() -> None:
+    tool = {
+        "name": "SendEmailWithAttachments",
+        "inputSchema": {
+            "properties": {
+                "message": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "body": {"type": "object", "properties": {"contentType": {}, "content": {}}},
+                        "toRecipients": {
+                            "type": "array",
+                            "items": {"type": "object", "properties": {"emailAddress": {"type": "object"}}},
+                        },
+                    },
+                    "required": ["subject", "toRecipients"],
+                },
+                "saveToSentItems": {"type": "boolean"},
+            },
+            "required": ["message"],
+        },
+    }
+
+    arguments = workiq_tools.build_mail_arguments(
+        tool, {"to": ["owner@contoso.com"], "subject": "S", "body_html": "<p>B</p>"}
+    )
+
+    assert arguments == {
+        "message": {
+            "subject": "S",
+            "body": {"contentType": "HTML", "content": "<p>B</p>"},
+            "toRecipients": [{"emailAddress": {"address": "owner@contoso.com"}}],
+        }
+    }
+
+
+def test_builder_refuses_before_calling_when_required_input_is_unknown() -> None:
+    tool = {"name": "ReplyToMessage", "inputSchema": {"properties": {"threadToken": {"type": "string"}}, "required": ["threadToken"]}}
+
+    with pytest.raises(workiq_tools.MailArgumentsError, match="threadToken"):
+        workiq_tools.build_mail_arguments(tool, {"message_id": "AAMk1", "comment": "hi"})
+
+
+def test_invoke_uses_live_tool_and_schema(monkeypatch) -> None:
+    calls = []
+    tool = {
+        "name": "SendEmailWithAttachments",
+        "inputSchema": {"properties": {"toRecipients": {"type": "array", "items": {"type": "string"}}, "subject": {}, "body": {}}},
+    }
+
+    async def fake_list(_server):
+        return [tool, {"name": "SendDraftMessage"}]
+
+    async def fake_call(server, name, arguments):
+        calls.append((name, arguments))
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    monkeypatch.setattr(workiq_tools, "_list_tools", fake_list)
+    monkeypatch.setattr(workiq_tools, "_call_tool", fake_call)
+
+    asyncio.run(workiq_tools.invoke_mail_operation("send", {"to": ["a@b.com"], "subject": "S", "body_html": "B"}))
+
+    assert calls == [("SendEmailWithAttachments", {"toRecipients": ["a@b.com"], "subject": "S", "body": "B"})]
+
+
+def test_failed_draft_send_deletes_the_draft(monkeypatch) -> None:
+    from tools.workiq_tools import MailToolNotFound
+
+    adapter, calls = _FakeAdapter(), []
+    controller = _controller(adapter, calls, monkeypatch)
+
+    async def fake_run(_context, operation, values):
+        calls.append((operation, values))
+        if operation == "send":
+            raise MailToolNotFound("no send tool")
+        if operation == "draft":
+            return {"result": {"content": [{"type": "text", "text": "Draft created: AAMkAGDraft" + "x" * 70}]}}
+        if operation == "send_draft":
+            raise RuntimeError("send failed")
+        return {"result": {}}
+
+    monkeypatch.setattr(controller, "_run_mail_operation", fake_run)
+    proposal = PendingProposal(
+        code="ABC234", email_id="e", email_reference={}, escalation_target="owner@partner-test.com",
+        decision=_decision(escalate=True),
+    )
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        asyncio.run(controller._escalate(_FakeContext(_email_activity()), proposal))
+
+    operations = [operation for operation, _ in calls]
+    assert operations == ["send", "draft", "send_draft", "delete"]
+    assert calls[-1][1]["message_id"].startswith("AAMkAGDraft")
+
+
+def test_describe_shape_never_includes_values() -> None:
+    shape = email_triage.describe_shape({"content": [{"type": "text", "text": "secret body"}], "isError": False})
+
+    assert "secret body" not in str(shape)
+    assert shape == {"content": [{"type": "str", "text": "str"}, "len=1"], "isError": "bool"}

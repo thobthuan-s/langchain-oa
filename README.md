@@ -121,15 +121,19 @@ Policy rules that the model cannot override:
 
 ### Verify against your tenant
 
-The Mail MCP operations are resolved at runtime by tool-name suffix:
-`updateMessage`, `reply`, and `sendMail`. Before relying on triage, confirm:
+The Work IQ Mail tools are resolved at runtime by name (`UpdateMessage`,
+`SendEmailWithAttachments`, `ReplyToMessage`, `CreateDraftMessage`,
+`SendDraftMessage`, `DeleteMessage`), with arguments built from each tool's
+live input schema. Before relying on triage, confirm:
 
 - Tagging succeeds. The proposal shows `Tagged:` rather than `Tagging failed:`.
   A failure usually means the notification's email id is not accepted as a
   Graph message id.
 - An approved reply arrives in the original thread. The agent first replies
-  through the Agent 365 email channel and falls back to the Mail MCP `reply`
-  tool. The Teams confirmation says which path was used.
+  through the Agent 365 email channel (no Work IQ call) and falls back to the
+  Mail `ReplyToMessage` tool. The Teams confirmation says which path was used.
+- An approved escalation reaches the account owner. The log line
+  `Mail tool SendEmailWithAttachments inputs=…` shows the schema it used.
 
 ### Partner mode: customer records
 

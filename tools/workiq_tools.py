@@ -595,19 +595,25 @@ def _extract_docx_text(payload: bytes) -> str | None:
 
 # Fixed mail write operations used by the email-triage executor after human approval.
 # They are never registered as LangChain tools, so the model cannot invoke them.
-# Candidate name suffixes per operation, in preference order. Catalog names vary
-# between Mail server versions, so each operation accepts several spellings.
+# Candidate tool names per operation, in preference order. The current Work IQ
+# Mail catalog comes first; older graph_mail_* spellings stay as fallbacks. A
+# candidate matches the whole normalized name or its suffix after a server prefix.
 _MAIL_OPERATION_SUFFIXES: dict[str, tuple[str, ...]] = {
     "tag": ("updatemessage",),
-    "reply": ("reply",),
-    "send": ("sendmail", "sendemail", "sendmailmessage"),
-    "draft": ("createmessage", "createdraft", "createdraftmessage"),
-    "send_draft": ("senddraft", "senddraftmessage"),
+    "reply": ("replytomessage", "reply"),
+    "send": ("sendemailwithattachments", "sendmail", "sendemail"),
+    "draft": ("createdraftmessage", "createmessage", "createdraft"),
+    "send_draft": ("senddraftmessage", "senddraft"),
+    "delete": ("deletemessage",),
 }
 
 
 class MailToolNotFound(WorkIqError):
     """No discovered Mail MCP tool matches a fixed operation."""
+
+
+class MailArgumentsError(WorkIqError):
+    """The live tool schema requires inputs this operation cannot supply; nothing was called."""
 
 
 def _normalized_tool_name(name: str) -> str:
@@ -624,7 +630,8 @@ def resolve_mail_operation(operation: str, tools: list[dict[str, Any]]) -> dict[
         matches = [
             candidate
             for candidate in tools
-            if _normalized_tool_name(str(candidate.get("name") or "")).endswith(suffix)
+            if _normalized_tool_name(str(candidate.get("name") or "")) == suffix
+            or _normalized_tool_name(str(candidate.get("name") or "")).endswith("mail" + suffix)
         ]
         if matches:
             return min(matches, key=lambda item: len(str(item.get("name") or "")))
@@ -637,14 +644,126 @@ def tool_input_properties(tool_definition: dict[str, Any]) -> dict[str, Any]:
     return properties if isinstance(properties, dict) else {}
 
 
+# Property names (normalized) that carry each semantic mail value.
+_MAIL_FIELD_NAMES: dict[str, tuple[str, ...]] = {
+    "message_id": ("id", "messageid", "itemid", "draftid", "draftmessageid"),
+    "to": ("torecipients", "to", "recipients", "toaddresses", "torecipient"),
+    "subject": ("subject",),
+    "body_html": ("body", "bodycontent", "htmlbody", "content", "messagebody", "emailbody"),
+    "comment": ("comment", "replytext", "replybody", "text"),
+    "categories": ("categories",),
+    "attachments": ("attachments",),
+}
+
+
+def _schema_type(schema: Any) -> str:
+    kind = schema.get("type") if isinstance(schema, dict) else None
+    if isinstance(kind, list):
+        kind = next((item for item in kind if item != "null"), None)
+    if not kind and isinstance(schema, dict) and "properties" in schema:
+        kind = "object"
+    return str(kind or "")
+
+
+def _shape_recipients(addresses: list[str], schema: Any) -> Any:
+    kind = _schema_type(schema)
+    if kind == "string":
+        return ";".join(addresses)
+    items = schema.get("items", {}) if isinstance(schema, dict) else {}
+    if _schema_type(items) == "string":
+        return list(addresses)
+    item_properties = items.get("properties", {}) if isinstance(items, dict) else {}
+    if "address" in item_properties and "emailAddress" not in item_properties:
+        return [{"address": address} for address in addresses]
+    return [{"emailAddress": {"address": address}} for address in addresses]
+
+
+def _shape_body(html: str, schema: Any) -> Any:
+    if _schema_type(schema) != "object":
+        return html
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    kind_key = next((key for key in properties if key.lower() in {"contenttype", "bodytype", "type"}), "contentType")
+    content_key = next((key for key in properties if key.lower() in {"content", "value", "text"}), "content")
+    return {kind_key: "HTML", content_key: html}
+
+
+def build_mail_arguments(tool_definition: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
+    """Map semantic values onto the live MCP input schema of one Mail tool.
+
+    Recognized properties are filled from ``values`` and shaped to their schema
+    type; HTML flags are set when present. Raises MailArgumentsError before any
+    call when a required property can't be supplied.
+    """
+
+    schema = tool_definition.get("inputSchema") or tool_definition.get("input_schema") or {}
+    properties = tool_input_properties(tool_definition)
+    required = [str(name) for name in (schema.get("required") or [])] if isinstance(schema, dict) else []
+    arguments: dict[str, Any] = {}
+
+    if not properties:
+        # No published schema: fall back to the Graph-style flat shape.
+        for field, key in (("message_id", "id"), ("subject", "subject"), ("comment", "comment"), ("categories", "categories")):
+            if values.get(field) is not None:
+                arguments[key] = values[field]
+        if values.get("to"):
+            arguments["toRecipients"] = _shape_recipients(values["to"], {"type": "array"})
+        if values.get("body_html"):
+            arguments["body"] = {"contentType": "HTML", "content": values["body_html"]}
+        return arguments
+
+    for name, prop_schema in properties.items():
+        normalized = _normalized_tool_name(name)
+        if normalized in {"preferhtml", "ishtml", "html"} and _schema_type(prop_schema) == "boolean":
+            arguments[name] = True
+            continue
+        if normalized in {"contenttype", "bodytype", "bodycontenttype"} and values.get("body_html"):
+            arguments[name] = "HTML"
+            continue
+        if normalized == "message" and _schema_type(prop_schema) == "object" and name in required:
+            arguments[name] = build_mail_arguments({"inputSchema": prop_schema}, values)
+            continue
+        for field, names in _MAIL_FIELD_NAMES.items():
+            if normalized not in names or values.get(field) is None:
+                continue
+            value = values[field]
+            if field == "to":
+                value = _shape_recipients(value, prop_schema)
+            elif field == "body_html":
+                value = _shape_body(value, prop_schema)
+            arguments[name] = value
+            break
+
+    missing = [name for name in required if name not in arguments]
+    if missing:
+        raise MailArgumentsError(
+            f"Mail tool {tool_definition.get('name')} requires {missing}, which this operation doesn't supply"
+        )
+    return arguments
+
+
+_logged_mail_schemas: set[str] = set()
+
+
+def _log_mail_schema(tool_definition: dict[str, Any]) -> None:
+    """Log each Mail tool's input property names and types once (never values)."""
+
+    name = str(tool_definition.get("name") or "")
+    if name in _logged_mail_schemas:
+        return
+    _logged_mail_schemas.add(name)
+    schema = tool_definition.get("inputSchema") or tool_definition.get("input_schema") or {}
+    shape = {prop: _schema_type(spec) or "?" for prop, spec in tool_input_properties(tool_definition).items()}
+    logger.info("Mail tool %s inputs=%s required=%s", name, shape, schema.get("required") if isinstance(schema, dict) else None)
+
+
 async def invoke_mail_operation(
     operation: str,
     build_arguments: Any,
 ) -> dict[str, Any]:
     """Run one fixed Mail MCP write operation in the current Work IQ context.
 
-    ``build_arguments`` receives the discovered tool definition so arguments can
-    follow the live input schema.
+    ``build_arguments`` is either a dict of semantic values for
+    ``build_mail_arguments`` or a callable that receives the tool definition.
     """
 
     tools = await _list_tools("mail")
@@ -654,7 +773,11 @@ async def invoke_mail_operation(
         logger.warning("No Mail MCP tool for operation %s; available tools: %s", operation, names)
         raise MailToolNotFound(f"No Mail MCP tool was discovered for operation '{operation}'")
     tool_name = str(tool_definition["name"])
-    result = await _call_tool("mail", tool_name, build_arguments(tool_definition))
+    _log_mail_schema(tool_definition)
+    arguments = build_arguments(tool_definition) if callable(build_arguments) else build_mail_arguments(
+        tool_definition, build_arguments
+    )
+    result = await _call_tool("mail", tool_name, arguments)
     if isinstance(result, dict) and result.get("isError"):
         raise WorkIqError(f"Mail MCP {tool_name} reported an error: {str(_bounded(result))[:500]}")
     return {"tool": tool_name, "result": _bounded(result)}

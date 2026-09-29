@@ -61,15 +61,20 @@ is not the word `set`.
 
 ### Email triage operations (opt-in)
 
-With `ENABLE_EMAIL_TRIAGE=true`, `email_triage.py` runs three fixed Mail MCP
-operations. They are application code, not model tools, and the model call that
-classifies email has no tools at all.
+With `ENABLE_EMAIL_TRIAGE=true`, `email_triage.py` runs fixed mail operations.
+They are application code, not model tools, and the model call that classifies
+email has no tools at all.
 
-| Operation | Mail MCP tool suffix | When it runs |
+| Operation | Path (Work IQ Mail tool) | When it runs |
 |---|---|---|
-| Tag the message with `Triage/<category>` and `Triage/<priority>` | `updateMessage` | Automatically, if `EMAIL_TRIAGE_AUTO_TAG=true` |
-| Reply in the original thread | Agent 365 email channel, falling back to `reply` | After an approver sends `approve` or `edit` in Teams |
-| Escalate to `EMAIL_TRIAGE_ESCALATION_ADDRESS` | `sendMail` | After an approver sends `approve` in Teams |
+| Tag the message with `Triage/<category>` and `Triage/<priority>` | `UpdateMessage` | Automatically, if `EMAIL_TRIAGE_AUTO_TAG=true` |
+| Reply in the original thread | **Agent 365 email channel** (no Work IQ call); `ReplyToMessage` only if the channel fails | After an approver sends `approve` or `edit` in Teams |
+| Escalate to the account owner or `EMAIL_TRIAGE_ESCALATION_ADDRESS` | `SendEmailWithAttachments`; last resort `CreateDraftMessage` then `SendDraftMessage`, deleting the draft (`DeleteMessage`) if the send fails | After an approver sends `approve` in Teams |
+
+Tools are resolved from the live Mail catalog by name, and arguments are built
+from each tool's published input schema. If a required input can't be
+supplied, the operation stops before calling the tool. Each tool's input
+property names are logged once (never values).
 
 Only the Entra object IDs in `EMAIL_TRIAGE_APPROVERS` can approve. Codes are
 single-use and expire after `EMAIL_TRIAGE_APPROVAL_TTL_HOURS`.
