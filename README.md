@@ -291,7 +291,7 @@ langchain-oa/
 │   └── azure_tools.py          read-only Azure inspection
 │
 ├── tests/                      contract tests for the risky parts
-├── infra/                      deploy, settings sync, packaging
+├── infra/                      deploy, settings sync, keyless auth, packaging
 ├── docs/                       onboarding, permissions, architecture, deployment, troubleshooting
 │
 ├── a365.config.template.json   copy to a365.config.json and fill in
@@ -322,9 +322,9 @@ git-ignored. You will see them locally but never in the repository.
 
 | File | Created by | Contains |
 |---|---|---|
-| `.env` | You, from `.env.template` | Endpoints and the Blueprint secret |
+| `.env` | You, from `.env.template` | Endpoints and IDs; the Blueprint secret until you switch to federated credentials |
 | `a365.config.json` | You, from the template | Tenant, subscription, endpoint |
-| `a365.generated.config.json` | `a365 setup all` | Blueprint and identity IDs, and a secret |
+| `a365.generated.config.json` | `a365 setup all` | Blueprint and identity IDs, and a secret until you delete it |
 | `manifest/` | `a365 publish` | Upload package with your IDs baked in |
 | `.venv/` | `python -m venv` | Local dependencies |
 
@@ -602,6 +602,18 @@ environment, and container app with a system-assigned identity, then assigns
 **Cognitive Services OpenAI User** on the model account and **Reader** on the
 subscription. It prints the `messagingEndpoint` to paste into `a365.config.json`.
 
+After `a365 setup all` and `infra/sync-a365-settings.sh`, remove the Blueprint
+secret from the deployment:
+
+```bash
+bash infra/enable-federated-credentials.sh
+```
+
+It adds a user-assigned managed identity (no Azure roles), trusts it from the
+Blueprint app, and switches the app to `FederatedCredentials`. Confirm a Teams
+turn, then delete the old secret. See
+[Deploy in your tenant, Step 4](docs/deploy-in-your-tenant.md#step-4--wire-the-settings-into-the-app).
+
 If your app region does not offer ACR Tasks, point the registry elsewhere — the
 two regions do not have to match:
 
@@ -656,6 +668,10 @@ cp a365.config.template.json a365.config.json
 # 3. Register, then package
 a365 setup all --agent-name <your-agent-name> --aiteammate --m365 --verbose
 a365 publish
+
+# 4. Wire settings, then go keyless and delete the Blueprint secret
+bash infra/sync-a365-settings.sh
+bash infra/enable-federated-credentials.sh
 ```
 
 Then upload `manifest/manifest.zip` in the Microsoft 365 admin center, approve the
@@ -669,7 +685,7 @@ duplicate silently binds to the wrong blueprint.
 
 | Caveat | Detail |
 |---|---|
-| Blueprint secret is stored in plaintext on macOS and Linux | The CLI reports `DPAPI encryption not available on this platform` and writes the secret to `a365.generated.config.json`. Rotate it if it is printed or shared, and prefer a managed identity federated to the blueprint. |
+| Blueprint secret is stored in plaintext on macOS and Linux | The CLI reports `DPAPI encryption not available on this platform` and writes the secret to `a365.generated.config.json`. Rotate it if it is printed or shared. After deploying, run `infra/enable-federated-credentials.sh`, delete the secret, and clear it from both local files. |
 | Default blueprint permissions exceed what this agent uses | `a365 setup all` grants a broad Graph scope set including `Mail.Send` and `Files.ReadWrite.All`. The read-only baseline needs almost none of them. Trim after setup, but keep `Mail.ReadWrite` and `Mail.Send` if email triage is enabled. |
 | Conversation history is in-process | Pinned to one replica. Move it to a shared store before scaling out. Email triage proposals are in-process too. |
 | Work IQ needs delegated per-audience tokens | Before an instance exists, or without the matching local `BEARER_TOKEN_MCP_*`, those tools return a clear error and the rest of the agent still works. |
@@ -678,8 +694,11 @@ duplicate silently binds to the wrong blueprint.
 ## Security notes
 
 - No model API key exists in this agent by design.
-- The current Python Activity host uses the Blueprint service-connection secret
-  written by `a365 setup all`; store it as a platform secret and rotate it if exposed.
+- The deployed app authenticates as the Blueprint with a federated credential
+  backed by a user-assigned managed identity, so no Blueprint secret is stored.
+  `a365 setup all` still creates one: switch with
+  `infra/enable-federated-credentials.sh`, then delete it.
+- Never show `.env` or `a365.generated.config.json` on screen while they hold a secret.
 - Keep `ENABLE_LOCAL_EVAL=false` outside a developer machine.
 - Keep `ENABLE_A365_SENSITIVE_DATA=false` unless prompt and response content
   capture has been approved.

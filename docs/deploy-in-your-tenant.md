@@ -113,8 +113,8 @@ created later, when the AI Teammate instance is approved and provisioned.
 > ([Quickstart: Connect an existing agent to Agent 365](https://learn.microsoft.com/microsoft-agent-365/developer/get-started))
 
 > On macOS the generated config may contain the Blueprint secret in plain text.
-> Never commit it, and rotate it if it is printed. See the auth-mode section of
-> the README for the keyless alternative.
+> Never commit it or show it on screen, and rotate it if it is printed. Step 4
+> replaces it with a keyless federated credential and deletes it.
 
 Then choose the Work IQ servers available in **your** tenant, and grant them:
 

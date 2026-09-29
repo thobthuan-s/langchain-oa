@@ -95,6 +95,7 @@ flowchart TD
     AI -->|delegated grant| B[Messaging / Activity Protocol]
 
     MI[Container App managed identity] -->|Azure RBAC| AZ[Azure OpenAI, ARM, Monitor]
+    UA[User-assigned managed identity] -->|federated credential| BP[Blueprint app]
 ```
 
 ### 1. Microsoft Graph — delegated, via the Agent Identity
@@ -150,6 +151,16 @@ Separate from Entra permissions. Assigned by `infra/deploy-azure.sh`.
 | Azure OpenAI account | Cognitive Services OpenAI User |
 | Subscription | Reader in the sample, so ARM, metrics, and logs can be inspected |
 | Narrower production alternative | Reader on selected resource groups plus Log Analytics Reader on selected workspaces |
+
+The app also carries a user-assigned managed identity, added by
+`infra/enable-federated-credentials.sh`. It has **no** Azure roles. Its only use
+is as the Blueprint's federated credential, so the app can prove it is the
+Blueprint without a secret. Check it with:
+
+```bash
+az ad app federated-credential list --id <BLUEPRINT_APP_ID> -o table
+az ad app credential list --id <BLUEPRINT_APP_ID>   # expect [] once the secret is deleted
+```
 
 ---
 

@@ -201,6 +201,7 @@ Two different things, and the second is the one people miss:
 |---|---|
 | Create the resource group, registry, workspace, environment, and app | **Contributor** on the subscription or target resource group |
 | Assign roles to the app's managed identity | **Owner**, **User Access Administrator**, or **Role Based Access Control Administrator** |
+| Switch to federated credentials (`enable-federated-credentials.sh`) | **Contributor** on the resource group, and ownership of the Blueprint app (the `a365 setup` account) or **Agent ID Administrator** in Entra |
 
 `Contributor` alone cannot create role assignments. Without one of the second
 set, the script provisions everything and then fails at `az role assignment
@@ -220,6 +221,7 @@ yourself, so you can run the agent locally with `az login`.
 | Log Analytics workspace | Backs the Container Apps environment and holds console logs |
 | Container Apps environment | One per agent in this sample |
 | Container app | 1.0 vCPU, 2 GiB, min and max 1 replica, external ingress on port 8080, system-assigned identity |
+| User-assigned managed identity | `id-<app>`, created by `enable-federated-credentials.sh`; no Azure roles, Blueprint federated credential only |
 
 It then assigns the app's managed identity:
 
