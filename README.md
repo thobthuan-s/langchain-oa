@@ -644,14 +644,20 @@ neither protects an ad-hoc copy or zip. Build the archive explicitly:
 infra/package-share.sh ../langchain-oa.tgz
 ```
 
-In a Git clone, the script packages committed files only with `git archive`, so
-ignored and untracked local files cannot slip in. Commit intended changes first.
-The fallback for a source download applies an explicit exclusion list.
+The script requires a Git checkout and packages tracked source files only,
+including any edits to those files that you have not committed yet. Ignored and
+untracked local files cannot slip in. It refuses known credential and generated
+filenames even if they were accidentally tracked. A source download without Git
+cannot be repackaged with this script; use a Git checkout instead.
+
+To share the GitHub repository instead, review all published branches and their
+history for private data, commit and push intended changes, then share the
+repository URL. Unlike the source archive, a Git clone includes past commits.
 
 Verify before sending:
 
 ```bash
-tar -tzf ../langchain-oa.tgz          # expect templates only, no .env
+tar -tzf ../langchain-oa.tgz          # expect templates only, no filled .env
 ```
 
 ### Standing it up on the other side

@@ -17,6 +17,10 @@ __pycache__/
 # Build output
 manifest/
 *.zip
+*.sarif
+
+# Local editor configuration
+.vscode/
 
 # macOS
 .DS_Store
